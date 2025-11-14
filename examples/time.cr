@@ -1,3 +1,4 @@
 log [
- global Date, new, at toLocaleString, call
+ global Date, new
+ at toLocaleString, call
 ]

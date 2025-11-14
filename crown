@@ -3,6 +3,7 @@ import fs from "fs/promises"
 import path from "path"
 
 const debug = process.env.CROWN_DEBUG === "1"
+let crownId = 0
 
 const END = {
  name: "end",
@@ -319,6 +320,7 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
   return value
  }
  const me = {
+  id: crownId++,
   "#"(comment) {
    lastComment = comment
    return me
@@ -401,10 +403,18 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    currentValue = uncrown(await currentValue(...argumentList))
    return me
   },
-  clone() {
+  clear_error() {
+   currentError = undefined
+   return me
+  },
+  clone(name) {
    const newNames = new Map()
    newNames.set(SCOPE.PARENT, names)
-   return crown(currentValue, newNames, basePath)
+   const newCrown = crown(currentValue, newNames, basePath)
+   if (typeof name === "string") {
+    me.set_raw(name, newCrown)
+   }
+   return newCrown
   },
   comment() {
    return lastComment
@@ -668,8 +678,9 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    currentValue = new RegExp(definition, flags)
    return me
   },
-  async run([source]) {
-   return me.walk(parse(source))
+  async run(_source) {
+   const source = Array.isArray(_source) ? _source[0] : _source
+   return me.walk(parse(uncrown(source)))
   },
   async runFile(source) {
    const filePath = basePath.length === 0 || source.startsWith("/") ? source : path.join(basePath, source)
@@ -695,6 +706,23 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
     context[name] = uncrown(value)
    } else {
     names.set(name, uncrown(value))
+   }
+   return me
+  },
+  set_raw(...path) {
+   const value = path.pop()
+   const name = path.pop()
+   if (path.length) {
+    const context = uncrown(me.at(...path))
+    if (context === "null") {
+     throw new Error(`cannot set property "${name}" of null`)
+    }
+    if (typeof context !== "object") {
+     throw new Error(`cannot set property "${name}" of ${typeof context}`)
+    }
+    context[name] = value
+   } else {
+    names.set(name, value)
    }
    return me
   },
@@ -783,9 +811,9 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
      }
      if (debug) {
       if (args.length > 0) {
-       console.debug(`crown ${command}`, args)
+       console.debug(`crown ${me.id} ${command}`, args)
       } else {
-       console.debug(`crown ${command}`)
+       console.debug(`crown ${me.id} ${command}`)
       }
      }
      const automaticWalk =
@@ -799,7 +827,7 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
        true: false,
       }[command] ?? true
      try {
-      const finalArguments = await Promise.all(args.map((x) => (automaticWalk && Array.isArray(x) ? me.clone().walk(crown(x)) : x)))
+      const finalArguments = await Promise.all(args.map(async (x) => (automaticWalk && Array.isArray(x) ? uncrown(await me.clone().walk(x)) : x)))
       try {
        await me[command](...finalArguments)
       } catch (e) {
@@ -808,7 +836,6 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
        console.error("Current value", currentValue)
        console.error(e)
        console.error("Error occurred at:", ...wrappedInstructions.slice(0, statementIndex), wrappedInstructions[statementIndex])
-       throw e
       }
      } catch (e) {
       currentError = e
@@ -816,7 +843,6 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
       console.error("Current value", currentValue)
       console.error(e)
       console.error("Error occurred at:", ...wrappedInstructions.slice(0, statementIndex), wrappedInstructions[statementIndex])
-      throw e
      }
     }
     if (statement.find((x) => Array.isArray(x) && x[0] === MACRO)) {
@@ -835,8 +861,10 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
  return me
 }
 
+const files = process.argv.length > 2 ? process.argv.slice(2) : ["repl.cr"]
+
 Promise.all(
- process.argv.slice(2).map(async (file) => {
+ files.map(async (file) => {
   try {
    await crown().runFile(file)
   } catch (e) {
