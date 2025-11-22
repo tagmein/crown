@@ -76,6 +76,7 @@ const INITIAL = {
  "["(control) {
   control.queueToStatement()
   control.block = []
+  control.prefix += "["
   control.stack.push(control.block)
   control.statement.push(control.block)
   control.statementStack.push(control.statement)
@@ -89,11 +90,16 @@ const INITIAL = {
   control.statementToBlock()
   control.stack.pop()
   control.block = control.stack[control.stack.length - 1]
+  if (control.prefix[control.prefix.length - 1] !== "[") {
+   throw new Error("no matching opening [ found")
+  }
+  control.prefix = control.prefix.slice(0, control.prefix.length - 1)
   control.statement = control.statementStack.pop()
  },
  "("(control) {
   control.queueToStatement()
   control.block = [MACRO]
+  control.prefix += "("
   control.stack.push(control.block)
   control.statement.push(control.block)
   control.statementStack.push(control.statement)
@@ -103,6 +109,10 @@ const INITIAL = {
   if (control.stack.length <= 1 || control.stack[control.stack.length - 1][0] !== MACRO) {
    throw new Error("Unexpected ) character")
   }
+  if (control.prefix[control.prefix.length - 1] !== "(") {
+   throw new Error("no matching opening ( found")
+  }
+  control.prefix = control.prefix.slice(0, control.prefix.length - 1)
   control.queueToStatement()
   control.statementToBlock()
   control.stack.pop()
@@ -111,11 +121,12 @@ const INITIAL = {
  },
 }
 
-function parse(source) {
+function parse(primarySource) {
  const top = []
  const control = {
   beginAtIndex: 0,
   block: top,
+  prefix: "",
   queue: "",
   stack: [top],
   statement: [],
@@ -153,31 +164,37 @@ function parse(source) {
   },
  }
  let state = INITIAL
- for (const charIndex in source) {
-  const char = source[charIndex]
-  if (char in state) {
-   try {
-    const newState = state[char](control)
-    if (newState) {
-     state = newState
+ function next(source) {
+  for (const charIndex in source) {
+   const char = source[charIndex]
+   if (char in state) {
+    try {
+     const newState = state[char](control)
+     if (newState) {
+      state = newState
+     }
+    } catch (e) {
+     console.error(e)
+     e.message = e.message + ` (at ${charIndex}, '${source.substring(charIndex, charIndex + 20)}')`
+     throw e
     }
-   } catch (e) {
-    console.error(e)
-    e.message = e.message + ` (at ${charIndex}, '${source.substring(charIndex, charIndex + 20)}')`
-    throw e
+    control.beginAtIndex = charIndex
+   } else {
+    control.queue += char
    }
-   control.beginAtIndex = charIndex
-  } else {
-   control.queue += char
   }
- }
- if (control.queue.length > 0) {
-  if (!("end" in state)) {
-   throw new Error(`Unterminated ${state.name} at ${control.beginAtIndex}-${source.length}`)
+  if (control.block !== top) {
+   return { complete: false, next, prefix: control.prefix }
   }
-  state = state.end(control)
+  if (control.queue.length > 0) {
+   if (!("end" in state)) {
+    throw new Error(`Unterminated ${state.name} at ${control.beginAtIndex}-${source.length}`)
+   }
+   state = state.end(control)
+  }
+  return { complete: true, value: top, prefix: control.prefix }
  }
- return top
+ return next(primarySource)
 }
 
 const globalBasePath = globalThis.basePath ?? process.cwd()
@@ -286,7 +303,9 @@ function processCrownList(crowns) {
 function crown(context = globalThis, names = new Map(), basePath = globalBasePath) {
  let currentError
  let currentValue = context
+ let parseNext
  let lastComment
+ let blockPrefix = ""
  function read(name, ...nameSegments) {
   let value = undefined
   let searchScope = names
@@ -510,6 +529,9 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    return me
   },
   async global(name, ...nameSegments) {
+   if (typeof name === "undefined") {
+    return globalThis
+   }
    let searchScope = globalThis
    if (!(name in searchScope)) {
     currentValue = undefined
@@ -591,8 +613,11 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
        const fileModule = eval(`(
          function () {
           return async function ${filePath.replace(/[^a-zA-Z]+/g, "_")} (scope) {
-          const code = parse(${JSON.stringify(content)})
-          await scope.walk(code)
+          const { complete, value } = parse(${JSON.stringify(content)})
+          if (!complete) {
+           throw new Error('unterminated block')
+          }
+          await scope.walk(value)
           return scope
          }})()`)
        currentValue = fileModule
@@ -655,6 +680,9 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    currentValue = (await currentValue(me.clone())).current()
    return me
   },
+  get prefix() {
+   return blockPrefix
+  },
   async prepend(...commands) {
    const statements = commands.pop()
    for (const statement of statements) {
@@ -680,7 +708,13 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
   },
   async run(_source) {
    const source = Array.isArray(_source) ? _source[0] : _source
-   return me.walk(parse(uncrown(source)))
+   const rawSource = uncrown(source)
+   const { complete, next, value, prefix } = (parseNext ?? parse)(rawSource)
+   parseNext = next
+   blockPrefix = prefix
+   if (complete) {
+    return me.walk(value)
+   }
   },
   async runFile(source) {
    const filePath = basePath.length === 0 || source.startsWith("/") ? source : path.join(basePath, source)
@@ -751,6 +785,23 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    })
    return me
   },
+  to(...pathCrowns) {
+   const path = pathCrowns.map(uncrown)
+   const name = path.pop()
+   if (path.length) {
+    const context = uncrown(me.at(...path))
+    if (context === "null") {
+     throw new Error(`cannot set property "${name}" of null`)
+    }
+    if (typeof context !== "object") {
+     throw new Error(`cannot set property "${name}" of ${typeof context}`)
+    }
+    context[name] = uncrown(currentValue)
+   } else {
+    names.set(name, uncrown(currentValue))
+   }
+   return me
+  },
   toString() {
    const currentValueString = Array.isArray(currentValue) ? `Array (${currentValue.length})` : String(currentValue)
    const currentValueDescription = currentValueString.length > 0 ? currentValueString : currentValue?.constructor?.name
@@ -776,6 +827,20 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    } else {
     names.delete(name)
    }
+   return me
+  },
+  loop(newValue) {
+   // loop a block as long as [ current ] is defined
+   console.log(newValue)
+  },
+  drop(newValue) {
+   // set current to undefined if any block returns true (keep if all return false)
+   currentValue = newValue
+   return me
+  },
+  keep(newValue) {
+   // set current to undefined if all blocks return false (keep if any return true)
+   currentValue = newValue
    return me
   },
   value(newValue) {
