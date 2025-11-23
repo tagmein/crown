@@ -2,6 +2,8 @@
 import fs from "fs/promises"
 import path from "path"
 
+globalThis.import = async (x) => await import(x)
+
 const debug = process.env.CROWN_DEBUG === "1"
 let crownId = 0
 
@@ -44,6 +46,7 @@ const STRING = {
 }
 
 const MACRO = Symbol("macro")
+const SPREAD = Symbol("spread")
 
 const INITIAL = {
  end(control) {
@@ -146,6 +149,9 @@ function parse(primarySource) {
      case "false":
       control.statement.push(false)
       break
+     case "*":
+      control.statement.push(SPREAD)
+      break
      default:
       if (String(parseFloat(control.queue)) === control.queue) {
        control.statement.push(parseFloat(control.queue))
@@ -174,8 +180,7 @@ function parse(primarySource) {
       state = newState
      }
     } catch (e) {
-     console.error(e)
-     e.message = e.message + ` (at ${charIndex}, '${source.substring(charIndex, charIndex + 20)}')`
+     e.message = e.message + ` at ${charIndex}, ${JSON.stringify(source.substring(charIndex, charIndex + 20))}`
      throw e
     }
     control.beginAtIndex = charIndex
@@ -279,7 +284,7 @@ function processCrownList(crowns) {
  let final = []
  let flatNext = false
  for (const c of crowns.map(uncrown)) {
-  if (c === "*") {
+  if (c === SPREAD) {
    if (flatNext) {
     throw new Error("Unexpected *")
    }
@@ -624,7 +629,7 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
        resolve()
       } catch (e) {
        currentError = e
-       console.error(e)
+       console.error(1, e.message)
        reject(e)
       }
      }
@@ -697,7 +702,7 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
     currentValue = await new Promise(uncrown(handler))
    } catch (e) {
     currentError = e
-    console.error("error in promise", e)
+    console.error(2, "error in promise", e.message)
    }
    return me
   },
@@ -709,11 +714,16 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
   async run(_source) {
    const source = Array.isArray(_source) ? _source[0] : _source
    const rawSource = uncrown(source)
-   const { complete, next, value, prefix } = (parseNext ?? parse)(rawSource)
-   parseNext = next
-   blockPrefix = prefix
-   if (complete) {
-    return me.walk(value)
+   try {
+    const { complete, next, value, prefix } = (parseNext ?? parse)(rawSource)
+    parseNext = next
+    blockPrefix = prefix
+    if (complete) {
+     return me.walk(value)
+    }
+   } catch (e) {
+    console.log(e.message)
+    return
    }
   },
   async runFile(source) {
@@ -862,7 +872,7 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    const wrappedInstructions = Array.isArray(instructions[0]) ? instructions : [instructions]
    for (const statementIndex in wrappedInstructions) {
     if (currentError) {
-     console.log("stop walk due to error")
+     // console.log("stop walk due to error")
      break
     }
     const statement = wrappedInstructions[statementIndex]
@@ -897,17 +907,17 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
        await me[command](...finalArguments)
       } catch (e) {
        currentError = e
-       console.error(`Error in ${command}`, finalArguments.map(uncrown))
-       console.error("Current value", currentValue)
-       console.error(e)
-       console.error("Error occurred at:", ...wrappedInstructions.slice(0, statementIndex), wrappedInstructions[statementIndex])
+       console.error(3, `Error in ${command}`, finalArguments.map(uncrown))
+       console.error(4, "Current value", currentValue)
+       console.error(5, e.message)
+       console.error(6, "Error occurred at:", ...wrappedInstructions.slice(0, statementIndex), wrappedInstructions[statementIndex])
       }
      } catch (e) {
       currentError = e
-      console.error(`Error computing arguments for ${command}`, args)
-      console.error("Current value", currentValue)
-      console.error(e)
-      console.error("Error occurred at:", ...wrappedInstructions.slice(0, statementIndex), wrappedInstructions[statementIndex])
+      console.error(7, `Error computing arguments for ${command}`, args)
+      console.error(8, "Current value", currentValue)
+      console.error(9, e.message)
+      console.error(10, "Error occurred at:", ...wrappedInstructions.slice(0, statementIndex), wrappedInstructions[statementIndex])
      }
     }
     if (statement.find((x) => Array.isArray(x) && x[0] === MACRO)) {
@@ -933,12 +943,12 @@ Promise.all(
   try {
    await crown().runFile(file)
   } catch (e) {
-   console.error(`Error in ${file}`)
-   console.error(e)
+   console.error(11, `Error in ${file}`)
+   console.error(12, e.message)
    process.exit(1)
   }
  })
 ).catch(async (e) => {
- console.error(e)
+ console.error(13, e.message)
  process.exit(1)
 })
