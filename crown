@@ -612,32 +612,25 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
   },
   async load(_filePath) {
    const filePath = uncrown(_filePath)
-   await new Promise(function (resolve, reject) {
-    fs.readFile(smartJoin(basePath, filePath), "utf-8", function (error, content) {
-     if (error) {
-      reject(error)
-     } else {
-      try {
-       const fileModule = eval(`(
-         function () {
-          return async function ${filePath.replace(/[^a-zA-Z]+/g, "_")} (scope) {
-          const { complete, value } = parse(${JSON.stringify(content)})
-          if (!complete) {
-           throw new Error('unterminated block')
-          }
-          await scope.walk(value)
-          return scope
-         }})()`)
-       currentValue = fileModule
-       resolve()
-      } catch (e) {
-       currentError = e
-       console.error(1, e.message)
-       reject(e)
-      }
+   const finalPath = smartJoin(basePath, filePath)
+   const content = await fs.readFile(finalPath, "utf-8")
+   try {
+    const fileModule = eval(`(
+     function () {
+     return async function ${filePath.replace(/[^a-zA-Z]+/g, "_")} (scope) {
+     const { complete, value } = parse(${JSON.stringify(content)})
+     if (!complete) {
+       throw new Error('unterminated block')
      }
-    })
-   })
+     await scope.walk(value)
+     return scope
+     }})()`)
+    currentValue = fileModule
+   } catch (e) {
+    currentError = e
+    console.error(1, e.message)
+    throw e
+   }
    return me
   },
   log(...argumentListRaw) {
@@ -654,6 +647,10 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
   multiply(...argumentListRaw) {
    const argumentList = processCrownList(argumentListRaw)
    currentValue = argumentList.reduce((product, x) => product * x, typeof currentValue === "number" ? currentValue : 1)
+  },
+  names() {
+   currentValue = names
+   return me
   },
   new(...argumentListRaw) {
    const argumentList = processCrownList(argumentListRaw)
@@ -685,7 +682,8 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    if (typeof currentValue !== "function") {
     throw new Error(`current value must be function, got ${typeof currentValue}`)
    }
-   currentValue = (await currentValue(me.clone())).current()
+   const finalCrown = await currentValue(me.clone())
+   currentValue = finalCrown.current()
    return me
   },
   get prefix() {
