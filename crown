@@ -188,6 +188,9 @@ function parse(primarySource) {
     control.queue += char
    }
   }
+  if (state === STRING) {
+   return { complete: false, next, prefix: `${control.prefix}'` }
+  }
   if (control.block !== top) {
    return { complete: false, next, prefix: control.prefix }
   }
