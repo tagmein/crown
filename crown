@@ -427,11 +427,20 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    if (typeof currentValue !== "function") {
     throw new Error(`Expecting value to be a function, but got: ${typeof currentValue}`)
    }
-   currentValue = uncrown(await currentValue(...argumentList))
+   try {
+    currentValue = uncrown(await currentValue(...argumentList))
+   } catch (e) {
+    currentError = e
+    currentValue = undefined
+   }
    return me
   },
   clear_error() {
    currentError = undefined
+   return me
+  },
+  current_error() {
+   currentValue = currentError ? currentError?.message ?? String(currentError) : undefined
    return me
   },
   clone(name) {
@@ -805,6 +814,15 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    currentValue = finalCrown.current()
    return me
   },
+  async try(block, onError) {
+   try {
+    await me.walk(block)
+   } catch (e) {
+    currentError = e
+    await me.walk(onError)
+   }
+   return me
+  },
   typeof(...ignored) {
    if (ignored.length > 0) {
     throw new Error(`typeof command does not accept arguments, got ${ignored.length}`)
@@ -928,6 +946,7 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
        pick: false,
        prepend: false,
        true: false,
+       try: false,
       }[command] ?? true
      try {
       const finalArguments = await Promise.all(args.map(async (x) => (automaticWalk && Array.isArray(x) ? uncrown(await me.clone().walk(x)) : x)))
