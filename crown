@@ -486,8 +486,12 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    throw new Error(messages.join(" "))
   },
   async false(instructionCrown) {
-   if (!currentValue) {
-    await me.clone().walk(uncrown(instructionCrown))
+   if (instructionCrown) {
+    if (!currentValue) {
+     await me.clone().walk(uncrown(instructionCrown))
+    }
+   } else {
+    currentValue = false
    }
   },
   async filter(argumentCrown) {
@@ -678,6 +682,16 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    }
    return me
   },
+  async pick(...x) {
+   for (const [condition, ...block] of x) {
+    const conditionResult = uncrown(await me.clone().walk([condition]))
+    if (conditionResult) {
+     await me.walk(block)
+     break
+    }
+   }
+   return me
+  },
   async point() {
    if (typeof currentValue !== "function") {
     throw new Error(`current value must be function, got ${typeof currentValue}`)
@@ -783,6 +797,14 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    await currentValue(...argumentList)
    return me
   },
+  async tap() {
+   if (typeof currentValue !== "function") {
+    throw new Error(`current value must be function, got ${typeof currentValue}`)
+   }
+   const finalCrown = await currentValue(me)
+   currentValue = finalCrown.current()
+   return me
+  },
   typeof(...ignored) {
    if (ignored.length > 0) {
     throw new Error(`typeof command does not accept arguments, got ${ignored.length}`)
@@ -819,8 +841,12 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    return `crown with ${typeof currentValue}: ${currentValueDescription}`
   },
   async true(instructionCrown) {
-   if (currentValue) {
-    await me.clone().walk(uncrown(instructionCrown))
+   if (instructionCrown) {
+    if (currentValue) {
+     await me.clone().walk(uncrown(instructionCrown))
+    }
+   } else {
+    currentValue = true
    }
   },
   unset(...pathCrowns) {
@@ -899,6 +925,7 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
        group: false,
        list: false,
        object: false,
+       pick: false,
        prepend: false,
        true: false,
       }[command] ?? true
