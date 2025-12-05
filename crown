@@ -2,10 +2,53 @@
 import fs from "fs/promises"
 import path from "path"
 
+globalThis.debug = process.env.CROWN_DEBUG === "1"
+globalThis.fs = fs
 globalThis.import = async (x) => await import(x)
+globalThis.path = path
 
-const debug = process.env.CROWN_DEBUG === "1"
-let crownId = 0
+globalThis.basePath = globalThis.basePath ?? process.cwd()
+
+setTimeout(function () {
+ const files = process.argv.length > 2 ? process.argv.slice(2) : ["repl.cr"]
+
+ Promise.all(
+  files.map(async (file) => {
+   try {
+    await crown().runFile(file)
+   } catch (e) {
+    console.error(11, `Error in ${file}`)
+    console.error(12, e.message)
+    process.exit(1)
+   }
+  })
+ ).catch(async (e) => {
+  console.error(13, e.message)
+  process.exit(1)
+ })
+})
+
+/* UNIFIED */ let crownId = 0
+
+const debug = globalThis.debug
+
+const _fs = globalThis.fs ?? {
+ async readFile(p) {
+  return (await fetch(p)).text()
+ },
+}
+const _path = globalThis.path ?? {
+ dirname(p) {
+  return "/" + p.split("/").slice(0, -1).join("/")
+ },
+ join(a, b) {
+  return [a.replace(/^\//, ""), b.replace(/^\.\//, "")].join("/")
+ },
+}
+
+if (globalThis?.location?.pathname) {
+ globalThis.basePath = globalThis.basePath ?? _path.dirname(globalThis.location.pathname)
+}
 
 const END = {
  name: "end",
@@ -205,14 +248,8 @@ function parse(primarySource) {
  return next(primarySource)
 }
 
-const globalBasePath = globalThis.basePath ?? process.cwd()
-
 const SCOPE = {
  PARENT: Symbol("SCOPE:PARENT"),
-}
-
-function smartJoin(basePath, filePath) {
- return path.join(basePath, filePath)
 }
 
 function uncrown(value) {
@@ -308,7 +345,7 @@ function processCrownList(crowns) {
  return final
 }
 
-function crown(context = globalThis, names = new Map(), basePath = globalBasePath) {
+function crown(context = globalThis, names = new Map(), basePath = globalThis.basePath) {
  let currentError
  let currentValue = context
  let parseNext
@@ -379,7 +416,7 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
   at(...path) {
    let isFirstSegment = true
    for (const segment of path) {
-    if (typeof segment === "string") {
+    if (typeof segment === "string" || typeof segment === "number") {
      if (currentValue === undefined || currentValue === null) {
       throw new Error(`cannot read '${segment}' of ${currentValue}`)
      }
@@ -623,10 +660,10 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    }
    return me
   },
-  async load(_filePath) {
+  async load(_filePath, basePath = globalThis.basePath) {
    const filePath = uncrown(_filePath)
-   const finalPath = smartJoin(basePath, filePath)
-   const content = await fs.readFile(finalPath, "utf-8")
+   const finalPath = _path.join(basePath, filePath)
+   const content = await _fs.readFile(finalPath, "utf-8")
    try {
     const fileModule = eval(`(
      function () {
@@ -750,21 +787,21 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
     return
    }
   },
-  async runFile(source) {
-   const filePath = basePath.length === 0 || source.startsWith("/") ? source : path.join(basePath, source)
-   basePath = path.dirname(filePath)
-   const contents = await fs.readFile(filePath, "utf-8")
+  async runFile(source, basePath = globalThis.basePath) {
+   const filePath = basePath.length === 0 || source.startsWith("/") ? source : _path.join(basePath, source)
+   basePath = _path.dirname(filePath)
+   const contents = await _fs.readFile(filePath, "utf-8")
    return me.run([contents])
   },
   async runJsonFile(source) {
    return me.walk(crown().at("require").call(crown().value(source)))
   },
   set(...pathCrowns) {
-   const path = pathCrowns.map(uncrown)
-   const value = path.pop()
-   const name = path.pop()
-   if (path.length) {
-    const context = uncrown(me.at(...path))
+   const p = pathCrowns.map(uncrown)
+   const value = p.pop()
+   const name = p.pop()
+   if (p.length) {
+    const context = uncrown(me.at(...p))
     if (context === "null") {
      throw new Error(`cannot set property "${name}" of null`)
     }
@@ -777,11 +814,11 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    }
    return me
   },
-  set_raw(...path) {
-   const value = path.pop()
-   const name = path.pop()
-   if (path.length) {
-    const context = uncrown(me.at(...path))
+  set_raw(...p) {
+   const value = p.pop()
+   const name = p.pop()
+   if (p.length) {
+    const context = uncrown(me.at(...p))
     if (context === "null") {
      throw new Error(`cannot set property "${name}" of null`)
     }
@@ -837,10 +874,10 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    return me
   },
   to(...pathCrowns) {
-   const path = pathCrowns.map(uncrown)
-   const name = path.pop()
-   if (path.length) {
-    const context = uncrown(me.at(...path))
+   const p = pathCrowns.map(uncrown)
+   const name = p.pop()
+   if (p.length) {
+    const context = uncrown(me.at(...p))
     if (context === "null") {
      throw new Error(`cannot set property "${name}" of null`)
     }
@@ -868,10 +905,10 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
    }
   },
   unset(...pathCrowns) {
-   const path = pathCrowns.map(uncrown)
-   const name = path.pop()
-   if (path.length) {
-    const context = uncrown(me.at(...path))
+   const p = pathCrowns.map(uncrown)
+   const name = p.pop()
+   if (p.length) {
+    const context = uncrown(me.at(...p))
     if (context === "null") {
      throw new Error(`cannot unset property "${name}" of null`)
     }
@@ -982,20 +1019,3 @@ function crown(context = globalThis, names = new Map(), basePath = globalBasePat
  }
  return me
 }
-
-const files = process.argv.length > 2 ? process.argv.slice(2) : ["repl.cr"]
-
-Promise.all(
- files.map(async (file) => {
-  try {
-   await crown().runFile(file)
-  } catch (e) {
-   console.error(11, `Error in ${file}`)
-   console.error(12, e.message)
-   process.exit(1)
-  }
- })
-).catch(async (e) => {
- console.error(13, e.message)
- process.exit(1)
-})
