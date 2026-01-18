@@ -18,7 +18,7 @@ set table-row [ load ./lib/table-row.cr, point ]
 
 get header, call Crown
 
-get header, call 'Current version: 2025-10-08' 4
+get header, call 'Current version: 2026-01-18' 4
 
 get header, call 'License: Public domain' 4
 
@@ -31,7 +31,7 @@ get code, call 'add 4 5, log The sum is [ current ] # prints \'The sum is 9\' to
 get header, call 'Getting Started' 2
 
 get paragraph, call [
- template 'Download a copy of the Crown JavaScript Engine from <a href="%0/language/crown.js">%0/language/crown.js</a> and add the following code to an HTML file:' [ get location origin ]
+ template 'Download a copy of the Crown JavaScript Engine from <a href="%0/crown.js">%0/crown.js</a> and add the following code to an HTML file:' [ get location origin ]
 ]
 get code, call '<!doctype html>
 <html>
@@ -138,7 +138,7 @@ get table-row, call [ get syntaxTable ] [
  list [
   'asterisk'
   '*'
-  'expands a list into separate items'
+  'expands a list into individual items'
  ]
 ]
 
@@ -163,6 +163,50 @@ get table-row, call [ get syntaxTable ] [
   'hash'
   '#'
   'marks the rest of the line as a comment'
+ ]
+]
+
+get header, call 'Crown Keywords' 2
+
+get paragraph, call 'Crown has 4 keywords. Keywords are the only words that are not strings by default. You may wrap a keyword in a string to get the string version, i.e. <code>\'null\'</code>.'
+
+set keywordTable [ get table, call ]
+
+get keywordTable classList add, call code-column-2
+
+get table-row, call [ get keywordTable ] [
+ list [ Keyword, Type, Description ]
+]
+
+get table-row, call [ get keywordTable ] [
+ list [
+  'null'
+  'object'
+  'Null value'
+ ]
+]
+
+get table-row, call [ get keywordTable ] [
+ list [
+  'undefined'
+  'undefined'
+  'Undefined value'
+ ]
+]
+
+get table-row, call [ get keywordTable ] [
+ list [
+  'true'
+  'boolean'
+  'Boolean true'
+ ]
+]
+
+get table-row, call [ get keywordTable ] [
+ list [
+  'false'
+  'boolean'
+  'Boolean false'
  ]
 ]
 
@@ -221,6 +265,18 @@ get table-row, call [ get commandTable ] [
 ]
 
 get table-row, call [ get commandTable ] [
+ list [ 'all'
+  'all true false true'
+  'Returns the logical AND of all arguments (example returns false)' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'any'
+  'any true false true'
+  'Returns the logical OR of all arguments (example returns true)' ]
+]
+
+get table-row, call [ get commandTable ] [
  list [ 'at'
   'at document body'
   'Sets focus to a property of focus (example will have focus set to <body> element)' ]
@@ -230,6 +286,18 @@ get table-row, call [ get commandTable ] [
  list [ 'call'
   'at alert, call Hello'
   'Invokes a function (example calls alert with \'Hello\'). Updates the focus to the return value. To retain the function in focus and ignore the return value, use tell instead.' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'clear_error'
+  'clear_error'
+  'Clears a captured error, allowing code walk to proceed.' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'current_error'
+  'current_error'
+  'Returns the captured error, if any.' ]
 ]
 
 get table-row, call [ get commandTable ] [
@@ -349,9 +417,27 @@ get table-row, call [ get commandTable ] [
 ]
 
 get table-row, call [ get commandTable ] [
+ list [ 'map'
+  'map [ function item index [ ... ] ]'
+  'Constructs a new Array with the results of calling a function with two arguments for each item in an Array' ]
+]
+
+get table-row, call [ get commandTable ] [
  list [ 'multiply'
   'multiply 3 9'
   'Returns the product of all arguments, and the focus if it is a number (example returns 27)' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'names'
+  'set foo bar, names'
+  'Return an object with all names in scope (example returns <code>{foo: "bar"}</code>)' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'new'
+  'global Date, new'
+  'Creates a new instance of a class in focus.' ]
 ]
 
 get table-row, call [ get commandTable ] [
@@ -363,7 +449,13 @@ get table-row, call [ get commandTable ] [
 get table-row, call [ get commandTable ] [
  list [ 'object'
   'object [ a 1, b 2 ]'
-  'Creates an object with given key-value pairs (example returns { a: 1, b: 2 })' ]
+  'Creates an object with given key-value pairs (example returns <code>{ a: 1, b: 2 }</code>)' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'pick'
+  'value 7, pick [ < 5, value small ] [ < 10, value medium ] [ true, value large ]'
+  'Selects from multiple options (example returns <code>\'medium\'</code>)' ]
 ]
 
 get table-row, call [ get commandTable ] [

@@ -6,7 +6,7 @@ function appendTo cells [
  get cells, each [
   function cell [
    set tableCell [ get element, call td ]
-   set [ get tableCell ] textContent [ get cell ]
+   set [ get tableCell ] innerHTML [ get cell ]
    get build, call [ get tableRow ] [
     get tableCell
    ]
