@@ -524,7 +524,9 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
   current_error() {
    // Get error message and set it as currentValue (for use in Crown code)
    // Returns the error message or undefined
-   const errorMsg = currentError ? (currentError?.message ?? String(currentError)) : undefined
+   // Check both currentError and _lastBlockError (from try blocks)
+   const error = me._lastBlockError ?? currentError
+   const errorMsg = error ? (error?.message ?? String(error)) : undefined
    currentValue = errorMsg
    return errorMsg
   },
@@ -731,7 +733,9 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
   },
   async load(_filePath, basePathOverride = currentBasePath ?? basePath ?? globalThis.basePath) {
    const filePath = uncrown(_filePath)
-   const finalPath = _path.join(basePathOverride, filePath)
+   // If filePath is absolute (starts with / on Unix or has drive letter on Windows), use it directly
+   const isAbsolute = filePath.startsWith('/') || (filePath.length > 1 && filePath[1] === ':')
+   const finalPath = isAbsolute ? filePath : _path.join(basePathOverride, filePath)
    nextBasePath = _path.dirname(finalPath)
    const content = await _fs.readFile(finalPath, "utf-8")
    try {
@@ -821,6 +825,11 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
    currentValue = finalCrown.current()
    return me
   },
+  scope() {
+   // Return the current scope object itself (useful for exporting scope from modules)
+   currentValue = me
+   return me
+  },
   get prefix() {
    return blockPrefix
   },
@@ -858,8 +867,8 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
      return me.walk(value)
     }
    } catch (e) {
-    console.log(e.message)
-    return
+    currentError = e
+    throw e
    }
   },
   async runFile(source, basePath = globalThis.basePath) {
