@@ -479,7 +479,38 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
     throw new Error(`Expecting value to be a function, but got: ${typeof currentValue}`)
    }
    try {
-    currentValue = uncrown(await currentValue(...argumentList))
+    const result = await currentValue(...argumentList)
+    // Check if the result is a crown scope with an error
+    if (result && typeof result._check_error === 'function') {
+     const nestedError = result._check_error()
+     if (nestedError !== undefined) {
+      currentError = new Error(nestedError)
+      currentValue = undefined
+      return me
+     }
+    }
+    currentValue = uncrown(result)
+   } catch (e) {
+    currentError = e
+    currentValue = undefined
+    // Rethrow to stop execution - currentError is now set and accessible
+    throw e
+   }
+   return me
+  },
+  async will(...argumentListRaw) {
+   const argumentList = processCrownList(argumentListRaw)
+   if (typeof currentValue !== "function") {
+    throw new Error(`Expecting value to be a function, but got: ${typeof currentValue}`)
+   }
+   try {
+    const functionReference = currentValue
+    if (typeof functionReference !== 'function') {
+      throw new Error(`will expects function, got ${typeof currentValue}`)
+    }
+    currentValue = async function () {
+      return uncrown(await functionReference(...argumentList))
+    }
    } catch (e) {
     currentError = e
     currentValue = undefined
@@ -491,7 +522,24 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
    return me
   },
   current_error() {
-   currentValue = currentError ? (currentError?.message ?? String(currentError)) : undefined
+   // Get error message and set it as currentValue (for use in Crown code)
+   // Returns the error message or undefined
+   const errorMsg = currentError ? (currentError?.message ?? String(currentError)) : undefined
+   currentValue = errorMsg
+   return errorMsg
+  },
+  _check_error() {
+   // Internal: check if there's an error without modifying currentValue
+   // Used for error propagation checking
+   return currentError ? (currentError?.message ?? String(currentError)) : undefined
+  },
+  get_error() {
+   // Get the error message from either the current error or a saved block error (from try)
+   // Sets the error message as currentValue
+   const error = me._lastBlockError ?? currentError
+   const errorMsg = error ? (error?.message ?? String(error)) : undefined
+   currentValue = errorMsg
+   currentError = undefined  // Clear any current error so execution continues
    return me
   },
   clone(name, nextBasePath) {
@@ -548,7 +596,13 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
   async false(instructionCrown) {
    if (instructionCrown) {
     if (!currentValue) {
-     await me.clone(undefined, currentBasePath ?? basePath).walk(uncrown(instructionCrown))
+     const clonedCrown = me.clone(undefined, currentBasePath ?? basePath)
+     await clonedCrown.walk(uncrown(instructionCrown))
+     // Propagate errors from the cloned scope
+     const nestedError = clonedCrown._check_error()
+     if (nestedError !== undefined) {
+      currentError = new Error(nestedError)
+     }
     }
    } else {
     currentValue = false
@@ -602,7 +656,8 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
   },
   async global(name, ...nameSegments) {
    if (typeof name === "undefined") {
-    return globalThis
+    currentValue = globalThis
+    return me
    }
    let searchScope = globalThis
    if (!(name in searchScope)) {
@@ -753,11 +808,16 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
    }
    return me
   },
-  async point() {
+  async point(...args) {
    if (typeof currentValue !== "function") {
     throw new Error(`current value must be function, got ${typeof currentValue}`)
    }
-   const finalCrown = await currentValue(me.clone(undefined, nextBasePath))
+   // If an argument is provided, use it as the initial currentValue for the scope
+   const initialValue = args.length > 0 ? args[0] : undefined
+   const newNames = new Map()
+   newNames.set(SCOPE.PARENT, names)
+   const scopeCrown = crown(initialValue, newNames, nextBasePath ?? currentBasePath ?? basePath)
+   const finalCrown = await currentValue(scopeCrown)
    currentValue = finalCrown.current()
    return me
   },
@@ -870,11 +930,24 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
    return me
   },
   async try(block, onError) {
-   try {
-    await me.walk(block)
-   } catch (e) {
-    currentError = e
+   // Clear error state before running block
+   const savedError = currentError
+   currentError = undefined
+   await me.walk(block)
+   // If an error occurred during the block, run the error handler
+   if (currentError) {
+    // Save the error for get_error to access, but clear currentError
+    // so the error handler can actually run
+    const blockError = currentError
+    currentError = undefined
+    // Store error in a special location for get_error
+    me._lastBlockError = blockError
     await me.walk(onError)
+    me._lastBlockError = undefined
+    // Error has been handled, leave currentError cleared
+   } else {
+    // Restore previous error state if block succeeded
+    currentError = savedError
    }
    return me
   },
@@ -916,7 +989,13 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
   async true(instructionCrown) {
    if (instructionCrown) {
     if (currentValue) {
-     await me.clone(undefined, currentBasePath ?? basePath).walk(uncrown(instructionCrown))
+     const clonedCrown = me.clone(undefined, currentBasePath ?? basePath)
+     await clonedCrown.walk(uncrown(instructionCrown))
+     // Propagate errors from the cloned scope
+     const nestedError = clonedCrown._check_error()
+     if (nestedError !== undefined) {
+      currentError = new Error(nestedError)
+     }
     }
    } else {
     currentValue = true
@@ -970,7 +1049,6 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
   },
   async walk(instructionsCrown) {
    if (currentError) {
-    console.log("will not walk due to error")
     return me
    }
    const instructions = uncrown(instructionsCrown)
@@ -1016,32 +1094,65 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
        try: false,
       }[command] ?? true
      try {
-      const finalArguments = await Promise.all(args.map(async (x) => (automaticWalk && Array.isArray(x) ? uncrown(await me.clone(undefined, currentBasePath ?? basePath).walk(x)) : x)))
+      const finalArguments = await Promise.all(args.map(async (x) => {
+       if (currentError) {
+        return undefined
+       }
+       if (automaticWalk && Array.isArray(x)) {
+        const clonedCrown = me.clone(undefined, currentBasePath ?? basePath)
+        await clonedCrown.walk(x)
+        // Propagate errors from cloned/nested Crown instances to parent
+        // Use _check_error() to avoid modifying currentValue
+        const nestedErrorMsg = clonedCrown._check_error()
+        if (nestedErrorMsg !== undefined) {
+         currentError = new Error(nestedErrorMsg)
+         return undefined
+        }
+        return uncrown(clonedCrown.current())
+       }
+       return x
+      }))
+      if (currentError) {
+       return
+      }
       try {
        await me[command](...finalArguments)
+       if (currentError) {
+        return
+       }
       } catch (e) {
        currentError = e
        console.error(3, `Error in ${command}`, finalArguments.map(uncrown))
        console.error(4, "Current value", currentValue)
        console.error(5, e.message)
        console.error(6, "Error occurred at:", ...wrappedInstructions.slice(0, statementIndex), wrappedInstructions[statementIndex])
+       return
       }
      } catch (e) {
-      currentError = e
+      // Only set currentError if it's not already set (from nested Crown error)
+      if (!currentError) {
+       currentError = e
+      }
       console.error(7, `Error computing arguments for ${command}`, args)
       console.error(8, "Current value", currentValue)
       console.error(9, e.message)
       console.error(10, "Error occurred at:", ...wrappedInstructions.slice(0, statementIndex), wrappedInstructions[statementIndex])
+      return
      }
     }
     if (statement.find((x) => Array.isArray(x) && x[0] === MACRO)) {
      for (const stmt of extractMacroStatements(statement)) {
-      // console.log("RUN MACRO", ...stmt);
       await runStatement(stmt)
+      if (currentError) {
+       break
+      }
      }
     } else {
      // console.log("NO MACRO", ...statement);
      await runStatement(statement)
+    }
+    if (currentError) {
+     break
     }
    }
    return me

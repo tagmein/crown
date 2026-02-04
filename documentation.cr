@@ -18,7 +18,7 @@ set table-row [ load ./lib/table-row.cr, point ]
 
 get header, call Crown
 
-get header, call 'Current version: 2026-01-18' 4
+get header, call 'Current version: 2026-02-04' 4
 
 get header, call 'License: Public domain' 4
 
@@ -295,12 +295,6 @@ get table-row, call [ get commandTable ] [
 ]
 
 get table-row, call [ get commandTable ] [
- list [ 'current_error'
-  'current_error'
-  'Returns the captured error, if any.' ]
-]
-
-get table-row, call [ get commandTable ] [
  list [ 'clone'
   'clone, set x 4'
   'Clones the current scope, retaining inheritance (in example, new scope has x set to 4)' ]
@@ -316,6 +310,12 @@ get table-row, call [ get commandTable ] [
  list [ 'current'
   'value 4, log [ current ]'
   'Returns the implicit focus (example logs \'4\')' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'current_error'
+  'current_error'
+  'Returns the captured error, if any.' ]
 ]
 
 get table-row, call [ get commandTable ] [
@@ -337,6 +337,12 @@ get table-row, call [ get commandTable ] [
 ]
 
 get table-row, call [ get commandTable ] [
+ list [ 'drop'
+  'get items, drop [ is empty ]'
+  'Sets current to undefined if any condition is true (keep if all return false)' ]
+]
+
+get table-row, call [ get commandTable ] [
  list [ 'each'
   'each [ function item index [ ... ] ]'
   'Calls a function with two arguments for each item in an Array' ]
@@ -346,6 +352,12 @@ get table-row, call [ get commandTable ] [
  list [ 'entries'
   'entries [ function key value index [ ... ] ]'
   'Calls a function with three arguments for each key value pair in an Object' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'error'
+  'error Something went wrong'
+  'Throws an error with the given message' ]
 ]
 
 get table-row, call [ get commandTable ] [
@@ -379,6 +391,12 @@ get table-row, call [ get commandTable ] [
 ]
 
 get table-row, call [ get commandTable ] [
+ list [ 'get_error'
+  'try [ ... ] [ get_error ]'
+  'Gets the error message from a try block' ]
+]
+
+get table-row, call [ get commandTable ] [
  list [ 'global'
   'log [ global document title ]'
   'Read the name from the global scope (example will log the title of the current document)' ]
@@ -394,6 +412,18 @@ get table-row, call [ get commandTable ] [
  list [ 'is'
   'value 5, is 5'
   'The same as =' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'it'
+  'value 5, log [ it ]'
+  'Returns the current value (alias for current)' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'keep'
+  'get items, keep [ is valid ]'
+  'Sets current to undefined if all conditions are false (keep if any return true)' ]
 ]
 
 get table-row, call [ get commandTable ] [
@@ -414,6 +444,12 @@ get table-row, call [ get commandTable ] [
  list [ 'log'
   'log foo is [ get foo ]'
   'Logs all arguments to the console (example logs \'foo is 4\' assuming foo = 4)' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'loop'
+  'value 5, loop [ log [ current ], subtract 1, keep [ > 0 ] ]'
+  'Loops while current is defined' ]
 ]
 
 get table-row, call [ get commandTable ] [
@@ -465,6 +501,12 @@ get table-row, call [ get commandTable ] [
 ]
 
 get table-row, call [ get commandTable ] [
+ list [ 'prepend'
+  'prepend get [ [ x call ] [ y call ] ]'
+  'Prepends commands to each statement in a statement list' ]
+]
+
+get table-row, call [ get commandTable ] [
  list [ 'promise'
   'promise [ function resolve reject [ ... ] ]'
   'Returns a promise, which can be resolved or rejected later with e.g. [ get resolve, call 4 ]' ]
@@ -495,6 +537,12 @@ get table-row, call [ get commandTable ] [
 ]
 
 get table-row, call [ get commandTable ] [
+ list [ 'tap'
+  'function scope [ ... ], tap'
+  'Calls the current function with the scope as an argument' ]
+]
+
+get table-row, call [ get commandTable ] [
  list [ 'tell'
   'at alert, tell Hello'
   'Invokes a function (example calls alert with \'Hello\'). Retains the function in focus and ignores the return value. To access the function\'s return value, use call instead.' ]
@@ -507,9 +555,27 @@ get table-row, call [ get commandTable ] [
 ]
 
 get table-row, call [ get commandTable ] [
+ list [ 'to'
+  'value 5, to myVar'
+  'Saves the current value to a variable name' ]
+]
+
+get table-row, call [ get commandTable ] [
  list [ 'true'
   'value 6, > 5, true [ log Big ]'
   'Runs the associated code block if focus is truthy This will log Big since 6 > 5' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'try'
+  'try [ error oops ] [ log caught [ get_error ] ]'
+  'Tries a code block, runs error handler if an error occurs' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'typeof'
+  'value 5, typeof'
+  'Returns the type of the current value' ]
 ]
 
 get table-row, call [ get commandTable ] [
@@ -521,8 +587,13 @@ get table-row, call [ get commandTable ] [
 get table-row, call [ get commandTable ] [
  list [ 'value'
   'value 5'
-  'Create a literal value (example returns 5)
-' ]
+  'Create a literal value (example returns 5)' ]
+]
+
+get table-row, call [ get commandTable ] [
+ list [ 'will'
+  'get myFunc, will arg1 arg2'
+  'Creates a function that calls current with the given arguments when invoked' ]
 ]
 
 get header, call 'About' 2
