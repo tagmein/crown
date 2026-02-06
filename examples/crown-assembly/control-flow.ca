@@ -1,0 +1,53 @@
+# Control flow in CrownAssembly
+# Tests labels, jumps, define/invoke, stack
+
+# Simple loop using labels
+value 0
+register_to 0
+
+label loop_start
+register_get 0
+compare_eq 5
+jump_if loop_done
+register_get 0
+add 1
+register_to 0
+jump loop_start
+
+label loop_done
+register_get 0
+log
+
+# Procedures with define/invoke
+define greet [
+  log Hello from a procedure!
+  return
+]
+
+define add_ten [
+  register_get 0
+  add 10
+  register_to 0
+  return
+]
+
+invoke greet
+
+register_set 0 5
+invoke add_ten
+register_get 0
+log
+
+# Stack operations
+value 10
+push
+value 20
+push
+value 30
+push
+pop
+log
+pop
+log
+pop
+log

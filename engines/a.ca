@@ -1,0 +1,602 @@
+# Crown Engine - implements Crown language in CrownAssembly
+#
+# Register allocation:
+#   10 = global scope (map)
+#   11 = current scope (map)
+#   16 = crown current value (the implicit accumulator)
+#   17 = temp: saved original value for arithmetic
+#   18 = temp: variable name in set, format string in template
+#   19 = temp: template args array
+#   20 = command name (for dispatch)
+#   21-25 = temp for loops/iteration
+#   30 = runtime arg count
+#   31 = runtime arg index
+
+# Initialize global scope
+map_new
+register_to 10
+register_to 11
+
+# === Main entry: run all .cr files passed after -- ===
+
+define crown_run_all [
+  args_count
+  register_to 30
+  value 0
+  register_to 31
+
+  label cra_loop
+  register_get 30
+  push
+  register_get 31
+  compare_eq
+  jump_if cra_done
+
+  # Load file
+  register_get 31
+  args_get
+  file_read
+
+  # Parse as Crown
+  tree_parse
+
+  # Create file scope with parent = global
+  map_new
+  register_to 11
+  register_get 10
+  push
+  register_get 11
+  map_set '__parent__'
+
+  # Walk the tree
+  invoke crown_walk
+
+  # Next file
+  register_get 31
+  add 1
+  register_to 31
+  jump cra_loop
+
+  label cra_done
+  return
+]
+
+# === Tree walker: process statements until END or BLOCK_END ===
+
+define crown_walk [
+  label cw_loop
+  tree_type
+
+  compare_eq 0
+  jump_if cw_done
+
+  compare_eq 2
+  jump_if cw_done
+
+  compare_eq 3
+  jump_if cw_skip
+
+  compare_eq 4
+  jump_if cw_dispatch
+
+  compare_eq 5
+  jump_if cw_dispatch
+
+  label cw_skip
+  tree_advance
+  jump cw_loop
+
+  label cw_dispatch
+  tree_value
+  register_to 20
+  tree_advance
+
+  invoke crown_dispatch
+
+  invoke cw_skip_to_end
+  jump cw_loop
+
+  label cw_done
+  return
+]
+
+# === Skip to end of current statement ===
+
+define cw_skip_to_end [
+  label cwse_loop
+  tree_type
+
+  compare_eq 3
+  jump_if cwse_done
+
+  compare_eq 0
+  jump_if cwse_done
+
+  compare_eq 2
+  jump_if cwse_done
+
+  compare_eq 1
+  jump_if cwse_block
+
+  tree_advance
+  jump cwse_loop
+
+  label cwse_block
+  tree_skip_block
+  jump cwse_loop
+
+  label cwse_done
+  return
+]
+
+# === Command dispatch ===
+
+define crown_dispatch [
+  register_get 20
+  string_compare 'log'
+  jump_if cd_log
+
+  register_get 20
+  string_compare 'value'
+  jump_if cd_value
+
+  register_get 20
+  string_compare 'set'
+  jump_if cd_set
+
+  register_get 20
+  string_compare 'get'
+  jump_if cd_get
+
+  register_get 20
+  string_compare 'add'
+  jump_if cd_add
+
+  register_get 20
+  string_compare 'subtract'
+  jump_if cd_subtract
+
+  register_get 20
+  string_compare 'multiply'
+  jump_if cd_multiply
+
+  register_get 20
+  string_compare 'divide'
+  jump_if cd_divide
+
+  register_get 20
+  string_compare 'template'
+  jump_if cd_template
+
+  # Unknown command - skip silently
+  return
+
+  label cd_log
+  invoke cr_log
+  return
+
+  label cd_value
+  invoke cr_value
+  return
+
+  label cd_set
+  invoke cr_set
+  return
+
+  label cd_get
+  invoke cr_get
+  return
+
+  label cd_add
+  invoke cr_add
+  return
+
+  label cd_subtract
+  invoke cr_subtract
+  return
+
+  label cd_multiply
+  invoke cr_multiply
+  return
+
+  label cd_divide
+  invoke cr_divide
+  return
+
+  label cd_template
+  invoke cr_template
+  return
+]
+
+# === Evaluate next argument from tree ===
+# Sets register 16 to the evaluated value
+
+define cr_eval_arg [
+  tree_type
+
+  compare_eq 5
+  jump_if cea_str
+
+  compare_eq 4
+  jump_if cea_word
+
+  compare_eq 1
+  jump_if cea_block
+
+  # STMT_END or other: no arg
+  return
+
+  label cea_str
+  tree_value
+  register_to 16
+  tree_advance
+  return
+
+  label cea_word
+  tree_value
+  register_to 22
+  # Try parse as number
+  to_number
+  # Check if original string starts with a digit or minus
+  register_get 22
+  push
+  value 0
+  string_char_at
+  register_to 23
+
+  # Check if char is digit (48-57) or minus (45)
+  register_get 23
+  compare_gt 47
+  jump_if_not cea_var
+
+  register_get 23
+  compare_lt 58
+  jump_if cea_is_num
+
+  register_get 23
+  compare_eq 45
+  jump_if cea_is_num
+
+  label cea_var
+  # Variable lookup
+  register_get 22
+  push
+  register_get 11
+  map_get_dynamic
+  register_to 16
+  tree_advance
+  return
+
+  label cea_is_num
+  register_get 22
+  to_number
+  register_to 16
+  tree_advance
+  return
+
+  label cea_block
+  tree_advance
+  invoke crown_walk
+  tree_advance
+  return
+]
+
+# === Crown command: value ===
+
+define cr_value [
+  invoke cr_eval_arg
+  return
+]
+
+# === Crown command: log ===
+
+define cr_log [
+  tree_type
+
+  compare_eq 3
+  jump_if crl_cur
+
+  compare_eq 2
+  jump_if crl_cur
+
+  compare_eq 0
+  jump_if crl_cur
+
+  # Has arguments - print them space-separated
+  label crl_args
+  tree_type
+  compare_eq 3
+  jump_if crl_nl
+  compare_eq 2
+  jump_if crl_nl
+  compare_eq 0
+  jump_if crl_nl
+
+  compare_eq 1
+  jump_if crl_skip_block
+
+  tree_value
+  print
+  tree_advance
+
+  tree_type
+  compare_eq 3
+  jump_if crl_nl
+  compare_eq 2
+  jump_if crl_nl
+
+  value 32
+  print_char
+  jump crl_args
+
+  label crl_skip_block
+  tree_skip_block
+  jump crl_args
+
+  label crl_nl
+  print_newline
+  return
+
+  label crl_cur
+  # Print crown current value with console.dir parity
+  register_get 16
+  typeof
+  string_compare 'string'
+  jump_if crl_str
+
+  # Number or other: just print
+  register_get 16
+  print
+  print_newline
+  return
+
+  label crl_str
+  value 39
+  print_char
+  register_get 16
+  print
+  value 39
+  print_char
+  print_newline
+  return
+]
+
+# === Crown command: set <name> <value> ===
+
+define cr_set [
+  tree_value
+  register_to 18
+  tree_advance
+
+  invoke cr_eval_arg
+
+  # Push value first (will be popped second by map_set_dynamic)
+  register_get 16
+  push
+  # Push key (variable name) second (will be popped first)
+  register_get 18
+  push
+  # Set in current scope
+  register_get 11
+  map_set_dynamic
+  return
+]
+
+# === Crown command: get <name> ===
+
+define cr_get [
+  tree_value
+  push
+  register_get 11
+  map_get_dynamic
+  register_to 16
+  tree_advance
+  return
+]
+
+# === Crown command: add <value> ===
+
+define cr_add [
+  register_get 16
+  register_to 17
+
+  invoke cr_eval_arg
+
+  register_get 16
+  push
+  register_get 17
+  add
+  register_to 16
+  return
+]
+
+# === Crown command: subtract <value> ===
+
+define cr_subtract [
+  register_get 16
+  register_to 17
+
+  invoke cr_eval_arg
+
+  register_get 16
+  push
+  register_get 17
+  subtract
+  register_to 16
+  return
+]
+
+# === Crown command: multiply <value> ===
+
+define cr_multiply [
+  register_get 16
+  register_to 17
+
+  invoke cr_eval_arg
+
+  register_get 16
+  push
+  register_get 17
+  multiply
+  register_to 16
+  return
+]
+
+# === Crown command: divide <value> ===
+
+define cr_divide [
+  register_get 16
+  register_to 17
+
+  invoke cr_eval_arg
+
+  register_get 16
+  push
+  register_get 17
+  divide
+  register_to 16
+  return
+]
+
+# === Crown command: template 'format' [arg0] [arg1] ... ===
+
+define cr_template [
+  # Read format string
+  tree_value
+  register_to 18
+  tree_advance
+
+  # Evaluate block arguments into temporary registers (25-29)
+  value 0
+  register_to 24
+
+  label crt_args
+  tree_type
+  compare_eq 1
+  jump_if_not crt_build
+
+  # Evaluate block argument
+  tree_advance
+  invoke crown_walk
+  tree_advance
+
+  # Save result based on arg index
+  register_get 24
+  compare_eq 0
+  jump_if crt_save0
+  compare_eq 1
+  jump_if crt_save1
+  compare_eq 2
+  jump_if crt_save2
+  jump crt_args
+
+  label crt_save0
+  register_get 16
+  register_to 25
+  register_get 24, add 1, register_to 24
+  jump crt_args
+
+  label crt_save1
+  register_get 16
+  register_to 26
+  register_get 24, add 1, register_to 24
+  jump crt_args
+
+  label crt_save2
+  register_get 16
+  register_to 27
+  register_get 24, add 1, register_to 24
+  jump crt_args
+
+  label crt_build
+  # Build result string from format
+  string_new
+
+  # Get format string length
+  register_get 18
+  push
+  string_length
+  register_to 21
+  value 0
+  register_to 22
+
+  label crt_loop
+  register_get 21
+  push
+  register_get 22
+  compare_eq
+  jump_if crt_done
+
+  # Get char at current index
+  register_get 18
+  push
+  register_get 22
+  string_char_at
+
+  compare_eq 37
+  jump_if crt_subst
+
+  # Regular char
+  string_append_char
+  register_get 22, add 1, register_to 22
+  jump crt_loop
+
+  label crt_subst
+  # Skip % and read digit
+  register_get 22, add 1, register_to 22
+  register_get 18
+  push
+  register_get 22
+  string_char_at
+  subtract 48
+
+  # Get the template arg by index
+  compare_eq 0
+  jump_if crt_get0
+  compare_eq 1
+  jump_if crt_get1
+  compare_eq 2
+  jump_if crt_get2
+  jump crt_skip_subst
+
+  label crt_get0
+  register_get 25
+  jump crt_append_arg
+
+  label crt_get1
+  register_get 26
+  jump crt_append_arg
+
+  label crt_get2
+  register_get 27
+  jump crt_append_arg
+
+  label crt_append_arg
+  # Save value before typeof (typeof overwrites current value)
+  register_to 23
+  typeof
+  string_compare 'string'
+  jump_if crt_is_str
+
+  # Number: convert to string
+  register_get 23
+  to_string
+  string_append_buf
+  jump crt_skip_subst
+
+  label crt_is_str
+  register_get 23
+  string_append_buf
+
+  label crt_skip_subst
+  register_get 22, add 1, register_to 22
+  jump crt_loop
+
+  label crt_done
+  string_finish
+  register_to 16
+  return
+]
+
+# Run all files
+invoke crown_run_all

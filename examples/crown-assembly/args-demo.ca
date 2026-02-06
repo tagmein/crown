@@ -1,0 +1,32 @@
+# Runtime arguments demo
+# Run with: ./crown-x86_64 examples/crown-assembly/args-demo.ca -- hello world
+
+args_count
+register_to 0
+
+# Print arg count
+register_get 0
+log
+
+# Print each argument
+value 0
+register_to 1
+
+label args_loop
+register_get 0
+push
+register_get 1
+compare_eq
+jump_if args_done
+
+register_get 1
+args_get
+log
+
+register_get 1
+add 1
+register_to 1
+jump args_loop
+
+label args_done
+log Done!

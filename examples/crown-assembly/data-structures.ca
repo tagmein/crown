@@ -1,0 +1,75 @@
+# Data structures in CrownAssembly
+# Tests maps and arrays
+
+# Map operations
+map_new
+register_to 0
+
+# Store values in map
+value 42
+push
+register_get 0
+map_set 'age'
+
+string 'Alice'
+push
+register_get 0
+map_set 'name'
+
+# Read values back
+register_get 0
+map_get 'name'
+log
+
+register_get 0
+map_get 'age'
+log
+
+# Check key existence
+register_get 0
+map_has 'name'
+jump_if has_name
+log FAIL: should have name
+jump has_done
+label has_name
+log PASS: map has name
+label has_done
+
+register_get 0
+map_has 'missing'
+jump_if has_missing
+log PASS: map does not have missing
+jump hm_done
+label has_missing
+log FAIL: should not have missing
+label hm_done
+
+# Array operations
+array_new
+register_to 1
+
+value 10
+push
+register_get 1
+array_push
+
+value 20
+push
+register_get 1
+array_push
+
+value 30
+push
+register_get 1
+array_push
+
+register_get 1
+array_length
+log
+
+# Get element at index 1 (push array, set index, get)
+register_get 1
+push
+value 1
+array_get
+log

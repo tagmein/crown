@@ -1,0 +1,8 @@
+# Hello World in CrownAssembly
+# Tests basic log output
+
+log Hello from CrownAssembly!
+value 42
+log
+string 'This is a string value'
+log

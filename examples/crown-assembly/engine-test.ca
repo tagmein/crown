@@ -1,0 +1,41 @@
+# Test compare_eq and string_compare inside procedures
+
+# Test 1: compare_eq inside proc
+define test_ceq [
+  value 42
+  compare_eq 42
+  jump_if ceq_match
+  log compare_eq: NO MATCH
+  return
+  label ceq_match
+  log compare_eq: MATCH
+  return
+]
+
+# Test 2: string_compare inside proc
+define test_scmp [
+  string 'hello'
+  string_compare 'hello'
+  jump_if scmp_match
+  log string_compare: NO MATCH
+  return
+  label scmp_match
+  log string_compare: MATCH
+  return
+]
+
+# Test 3: compare_eq with jump_if on next line
+define test_ceq2 [
+  value 5
+  compare_eq 5
+  jump_if ceq2_match
+  log compare_eq2: NO MATCH
+  return
+  label ceq2_match
+  log compare_eq2: MATCH
+  return
+]
+
+invoke test_ceq
+invoke test_scmp
+invoke test_ceq2

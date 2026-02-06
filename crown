@@ -105,7 +105,7 @@ const INITIAL = {
  " "(control) {
   control.queueToStatement()
  },
- "\r"() {},
+ "\r"() { },
  "\n"(control) {
   control.queueToStatement()
   control.statementToBlock()
@@ -506,10 +506,10 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
    try {
     const functionReference = currentValue
     if (typeof functionReference !== 'function') {
-      throw new Error(`will expects function, got ${typeof currentValue}`)
+     throw new Error(`will expects function, got ${typeof currentValue}`)
     }
     currentValue = async function () {
-      return uncrown(await functionReference(...argumentList))
+     return uncrown(await functionReference(...argumentList))
     }
    } catch (e) {
     currentError = e
@@ -758,7 +758,15 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
    return me
   },
   log(...argumentListRaw) {
-   console.log(...processCrownList(argumentListRaw))
+   if (argumentListRaw.length === 0) {
+    if (currentError) {
+     console.error(currentError)
+    }
+    console.dir(currentValue, { depth: null })
+   }
+   else {
+    console.log(...processCrownList(argumentListRaw))
+   }
   },
   async map(argumentCrown) {
    if (!Array.isArray(currentValue)) {
@@ -872,7 +880,11 @@ function crown(context = globalThis, names = new Map(), basePath = globalThis.ba
    }
   },
   async runFile(source, basePath = globalThis.basePath) {
-   const filePath = basePath.length === 0 || source.startsWith("/") ? source : _path.join(basePath, source)
+   let filePath = basePath.length === 0 || source.startsWith("/") ? source : _path.join(basePath, source)
+   const stat = await _fs.stat(filePath).catch(() => null)
+   if (stat?.isDirectory()) {
+    filePath = _path.join(filePath, 'main.cr')
+   }
    currentBasePath = basePath = _path.dirname(filePath)
    const contents = await _fs.readFile(filePath, "utf-8")
    return me.run([contents])

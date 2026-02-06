@@ -1,0 +1,42 @@
+# Arithmetic operations in CrownAssembly
+# Tests register ops, math, comparisons
+
+# Register operations
+register_set 0 100
+register_get 0
+log
+
+# Arithmetic
+value 10
+add 5
+log
+subtract 3
+log
+multiply 4
+log
+divide 6
+log
+
+# Store result in register
+register_to 1
+register_get 1
+log
+
+# Compare
+value 42
+compare_eq 42
+jump_if eq_pass
+log FAIL: 42 should equal 42
+jump eq_done
+label eq_pass
+log PASS: 42 equals 42
+label eq_done
+
+value 10
+compare_lt 20
+jump_if lt_pass
+log FAIL: 10 should be less than 20
+jump lt_done
+label lt_pass
+log PASS: 10 is less than 20
+label lt_done
