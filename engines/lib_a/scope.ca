@@ -1,0 +1,2 @@
+# Minimal module: exports empty map (for testing load/run_ca_string/merge_exports)
+map_new

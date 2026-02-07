@@ -38,11 +38,12 @@ default_repl:
     .asciz "repl.cr"'
 
 get emit_bss, call '    .lcomm saved_rsp, 8
+    .lcomm saved_envp, 8
     .lcomm ca_files, 2048
     .lcomm ca_file_count, 8
     .lcomm rt_args, 2048
     .lcomm rt_args_count, 8
-    .lcomm file_buffer, 65536
+    .lcomm file_buffer, 1048576
     .lcomm file_size, 8
     .lcomm banner_suppress, 8'
 
@@ -50,6 +51,10 @@ get emit_text, call '.globl _start
 _start:
     # Save initial stack pointer (argc/argv access)
     movq %rsp, saved_rsp(%rip)
+    # Save envp for execve (envp = rsp + 8*(argc+2))
+    movq (%rsp), %rcx
+    leaq 16(%rsp, %rcx, 8), %rax
+    movq %rax, saved_envp(%rip)
 
     # Initialize heap
     call heap_init
@@ -183,6 +188,7 @@ parse_args:
 # Reads file into file_buffer, sets file_size
 load_file:
     pushq %rbx
+    pushq %r12
     # Open file (O_RDONLY = 0)
     xorq %rsi, %rsi
     xorq %rdx, %rdx
@@ -190,21 +196,31 @@ load_file:
     testq %rax, %rax
     js .lf_fail
     movq %rax, %rbx               # save fd
-    # Read file
+    xorq %r12, %r12               # r12 = total bytes read
+.lf_read_loop:
     movq %rbx, %rdi
     leaq file_buffer(%rip), %rsi
-    movq $65535, %rdx
+    addq %r12, %rsi
+    movq $1048575, %rdx
+    subq %r12, %rdx
+    testq %rdx, %rdx
+    jle .lf_read_done
     call sys_read
     testq %rax, %rax
     js .lf_fail_close
-    movq %rax, file_size(%rip)
+    jz .lf_read_done               # EOF
+    addq %rax, %r12
+    jmp .lf_read_loop
+.lf_read_done:
+    movq %r12, file_size(%rip)
     # Null-terminate the buffer
     leaq file_buffer(%rip), %rdi
-    movb $0, (%rdi, %rax)
+    movb $0, (%rdi, %r12)
     # Close file
     movq %rbx, %rdi
     call sys_close
     xorq %rax, %rax
+    popq %r12
     popq %rbx
     ret
 .lf_fail_close:
@@ -212,6 +228,7 @@ load_file:
     call sys_close
 .lf_fail:
     movq $-1, %rax
+    popq %r12
     popq %rbx
     ret
 

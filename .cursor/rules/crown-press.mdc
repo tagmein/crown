@@ -1,0 +1,51 @@
+---
+description: Crown language, Press build, and crown-x86_64 binary
+globs: press/**/*.cr,press/**/*.ca,engines/*.ca,examples/**/*.cr,examples/**/*.ca
+alwaysApply: true
+---
+
+# Crown and Press
+
+## Crown (Node runtime)
+
+- **Crown** is the language/runtime that runs under Node (e.g. `./crown` is the Crown runner).
+- Run a file: `./crown main.cr` or `./crown examples/time.cr`.
+- REPL: `./crown`.
+
+## Press (build system)
+
+- **Press** is Crown code in `press/` that **builds** the native binary `crown-x86_64`.
+- Run the build: **`./crown press/main.cr`** (or `./crown press` if that resolves to `press/main.cr`).
+- What happens:
+  1. Crown executes `press/main.cr` (Crown syntax: `set`, `get`, `load`, `emit_data`, `emit_bss`, `emit_text`, etc.).
+  2. `main.cr` loads `press/vm/x86_64/*.cr` in order (syscalls, strings, memory, data-structures, parser, interpreter, entry). Those files are Crown that call `emit_*` with **string literals whose content is GAS x86-64 assembly**. Crown never executes that assembly; it only appends it to section buffers.
+  3. Buffers are joined into one assembly source, written to **`crown-x86_64.s`**, then **`as -g -o crown-x86_64.o crown-x86_64.s`** and **`ld -o crown-x86_64 crown-x86_64.o`** produce **`crown-x86_64`**.
+
+So: **Press = Crown program that emits assembly and runs assembler/linker.** One platform = one folder under `press/vm/` (e.g. `press/vm/x86_64/`).
+
+## CrownAssembly (VM language)
+
+- **CrownAssembly** (`.ca`) is the language that **`crown-x86_64`** executes. It is defined and implemented by the code under **`press/vm/`** (especially `press/vm/x86_64/`):
+  - **Parser** (`parser.cr`): parse tree format, node types (END, BLOCK_START/BLOCK_END, STMT_END, TOKEN_WORD, TOKEN_STRING, …).
+  - **Interpreter** (`interpreter.cr`): CA commands (e.g. `log`, `value`, `register_to`, `map_new`, `compare_eq`, `invoke`, `define`, `label`, `jump`, `sys_epoch`, `sys_date_string`), VM loop, `vm_cur`, registers, stack.
+  - **Entry** (`entry.cr`): `_start`, argument parsing (`--` separates `.ca` files from runtime args), `run_ca_files`, file loading.
+  - **Data structures / memory / syscalls / strings**: maps, arrays, heap, syscalls (open, read, pipe, fork, execve, etc.).
+
+Engines (e.g. `engines/a.ca`) are CrownAssembly programs that implement Crown semantics so that `crown-x86_64 ./engines/a.ca -- file.cr` runs Crown source via the VM.
+
+## Running `crown-x86_64`
+
+- **Usage:** `./crown-x86_64 [options] [file.ca ...] [-- args...]`
+- **Options:** `-0` or `--zero` suppresses the banner (so only script output is printed).
+- **Before `--`:** list of `.ca` files to run (CrownAssembly).
+- **After `--`:** runtime arguments (e.g. Crown scripts or other args); available in CA via `args_count` / `args_get`.
+
+**Examples:**
+
+```bash
+./crown-x86_64 examples/crown-assembly/hello.ca
+./crown-x86_64 -0 ./engines/a.ca -- examples/time.cr
+./crown-x86_64 examples/crown-assembly/args-demo.ca -- hello world
+```
+
+Rebuild after changing anything under `press/`: **`./crown press/main.cr`**, then run **`./crown-x86_64`** as above.

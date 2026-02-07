@@ -1,7 +1,7 @@
 # Control flow in CrownAssembly
 # Tests labels, jumps, define/invoke, stack
 
-# Simple loop using labels
+# Simple loop using labels (0 -> 5)
 value 0
 register_to 0
 
@@ -17,6 +17,19 @@ jump loop_start
 label loop_done
 register_get 0
 log
+log PASS: loop reached 5
+
+register_get 0
+compare_eq 5
+jump_if print_pass
+log FAIL: register 0 value is not 5
+register_get 0
+log
+jump check_done
+label print_pass
+log PASS: register 0 value is 5
+label check_done
+
 
 # Procedures with define/invoke
 define greet [
@@ -32,13 +45,22 @@ define add_ten [
 ]
 
 invoke greet
+log PASS: greet returned
 
 register_set 0 5
 invoke add_ten
 register_get 0
 log
+register_get 0
+compare_eq 15
+jump_if add_ten_ok
+log FAIL: add_ten should yield 15
+jump add_ten_done
+label add_ten_ok
+log PASS: add_ten produced 15
+label add_ten_done
 
-# Stack operations
+# Stack operations (push 10,20,30 then pop -> 30,20,10)
 value 10
 push
 value 20
@@ -47,7 +69,29 @@ value 30
 push
 pop
 log
+compare_eq 30
+jump_if stack_first_ok
+log FAIL: first pop should be 30
+jump stack_first_done
+label stack_first_ok
+log PASS: first pop is 30
+label stack_first_done
 pop
 log
+compare_eq 20
+jump_if stack_second_ok
+log FAIL: second pop should be 20
+jump stack_second_done
+label stack_second_ok
+log PASS: second pop is 20
+label stack_second_done
 pop
 log
+compare_eq 10
+jump_if stack_third_ok
+log FAIL: third pop should be 10
+jump stack_done
+label stack_third_ok
+log PASS: third pop is 10
+label stack_done
+log PASS: control-flow checks complete

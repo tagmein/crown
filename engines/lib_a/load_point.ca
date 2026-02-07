@@ -1,0 +1,3 @@
+# load_point module: will export cr_load, cr_point (stub for now; defines stay in a.ca)
+# Final value = exports map (empty for now so load/point remain in main engine)
+map_new

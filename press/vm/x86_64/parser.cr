@@ -15,11 +15,11 @@
 get emit_bss, call '    .lcomm token_buf, 4096
     .lcomm token_len, 8
     .lcomm parse_state, 8
-    .lcomm parse_tree, 262144
+    .lcomm parse_tree, 2097152
     .lcomm parse_node_count, 8
     .lcomm parse_output_ptr, 8
     .lcomm parse_has_tokens, 8
-    .lcomm cr_parse_tree, 262144
+    .lcomm cr_parse_tree, 2097152
     .lcomm cr_node_count, 8'
 
 get emit_text, call '# === CrownAssembly Parser ===
@@ -36,6 +36,12 @@ parse_cr:
     leaq cr_parse_tree(%rip), %rdx
     call parse_common
     movq %rax, cr_node_count(%rip)
+    ret
+
+# parse_ca_to(input=%rdi, length=%rsi, output=%rdx) -> node count in %rax
+# Parses CA into the given buffer (for run_ca_string / module loading)
+parse_ca_to:
+    call parse_common
     ret
 
 # parse_common(input=%rdi, length=%rsi, output=%rdx) -> node count in %rax

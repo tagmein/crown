@@ -1,14 +1,14 @@
-# Test compare_eq and string_compare inside procedures
+# Test compare_eq, string_compare, and compare_string_eq inside procedures
 
 # Test 1: compare_eq inside proc
 define test_ceq [
   value 42
   compare_eq 42
   jump_if ceq_match
-  log compare_eq: NO MATCH
+  log FAIL: compare_eq 42 inside procedure
   return
   label ceq_match
-  log compare_eq: MATCH
+  log PASS: compare_eq inside procedure
   return
 ]
 
@@ -17,10 +17,10 @@ define test_scmp [
   string 'hello'
   string_compare 'hello'
   jump_if scmp_match
-  log string_compare: NO MATCH
+  log FAIL: string_compare inside procedure
   return
   label scmp_match
-  log string_compare: MATCH
+  log PASS: string_compare inside procedure
   return
 ]
 
@@ -29,13 +29,27 @@ define test_ceq2 [
   value 5
   compare_eq 5
   jump_if ceq2_match
-  log compare_eq2: NO MATCH
+  log FAIL: compare_eq 5 inside procedure
   return
   label ceq2_match
-  log compare_eq2: MATCH
+  log PASS: compare_eq with jump_if on next line
+  return
+]
+
+# Test 4: compare_string_eq inside proc (same semantics as string_compare)
+define test_cseq [
+  string 'world'
+  compare_string_eq 'world'
+  jump_if cseq_match
+  log FAIL: compare_string_eq inside procedure
+  return
+  label cseq_match
+  log PASS: compare_string_eq inside procedure
   return
 ]
 
 invoke test_ceq
 invoke test_scmp
 invoke test_ceq2
+invoke test_cseq
+log PASS: engine-test checks complete

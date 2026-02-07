@@ -1,29 +1,117 @@
-# Crown Engine - implements Crown language in CrownAssembly
+# Crown Engine - Complete Crown Runtime in CrownAssembly
 #
 # Register allocation:
 #   10 = global scope (map)
 #   11 = current scope (map)
-#   16 = crown current value (the implicit accumulator)
-#   17 = temp: saved original value for arithmetic
-#   18 = temp: variable name in set, format string in template
-#   19 = temp: template args array
-#   20 = command name (for dispatch)
-#   21-25 = temp for loops/iteration
+#   12 = base path (string)
+#   13 = next base path (set by load)
+#   14 = last comment string
+#   16 = crown current value (accumulator)
+#   17-19 = temp for various operations
+#   20 = command name (string)
+#   21-29 = temp for loops/iterations
 #   30 = runtime arg count
 #   31 = runtime arg index
+#   40 = error flag (0=no error, 1=error)
+#   41 = error message (string)
+#   42 = last block error (string)
+#   50-69 = temp for function/call/complex ops
+#   70-79 = native function dispatch
+#   80-89 = iteration (map/filter/each)
+#   90-99 = macro expansion
+#
+# Value types: 0=undefined 1=null 2=integer 3=string 4=boolean 5=array 6=map
+# Functions: type=6 map with __fn_body, __fn_scope, __fn_params, __fn_native
 
-# Initialize global scope
+# === Initialization ===
 map_new
 register_to 10
 register_to 11
+value 0
+register_to 40
+register_to 42
+register_to 14
+string 'engines'
+register_to 12
+register_to 13
+
+# === Merge exports map (current) into global (register 10) ===
+define merge_exports [
+  register_get 16
+  register_to 50
+  register_get 50
+  register_to 16
+  invoke cr_entries
+  register_to 55
+  register_get 55
+  array_length
+  register_to 56
+  value 0
+  register_to 57
+  label me_loop
+  register_get 57
+  push
+  register_get 56
+  compare_eq
+  jump_if me_done
+  register_get 55
+  push
+  register_get 57
+  register_to 16
+  array_get
+  register_to 58
+  register_get 58
+  push
+  value 0
+  register_to 16
+  array_get
+  register_to 59
+  register_get 58
+  push
+  value 1
+  register_to 16
+  array_get
+  register_to 60
+  register_get 10
+  register_to 16
+  register_get 60
+  push
+  register_get 59
+  push
+  map_set_dynamic
+  register_get 57
+  add 1
+  register_to 57
+  jump me_loop
+  label me_done
+  return
+]
+
+# === Load lib_a modules and merge their exports ===
+string 'engines/lib_a/scope.ca'
+register_to 16
+file_read
+run_ca_string
+register_to 16
+invoke merge_exports
+
+string 'engines/lib_a/load_point.ca'
+register_to 16
+file_read
+run_ca_string
+register_to 16
+invoke merge_exports
 
 # === Main entry: run all .cr files passed after -- ===
-
 define crown_run_all [
   args_count
   register_to 30
   value 0
   register_to 31
+
+  # Cache current time for Date (register 81 = epoch seconds)
+  sys_epoch
+  register_to 81
 
   label cra_loop
   register_get 30
@@ -32,12 +120,16 @@ define crown_run_all [
   compare_eq
   jump_if cra_done
 
-  # Load file
   register_get 31
   args_get
-  file_read
+  register_to 50
 
-  # Parse as Crown
+  # Compute basePath = dirname of file
+  invoke compute_dirname
+
+  # Read and parse file
+  register_get 50
+  file_read
   tree_parse
 
   # Create file scope with parent = global
@@ -45,10 +137,16 @@ define crown_run_all [
   register_to 11
   register_get 10
   push
+  string '__parent__'
+  push
   register_get 11
-  map_set '__parent__'
+  map_set_dynamic
 
-  # Walk the tree
+  # Clear error state
+  value 0
+  register_to 40
+
+  # Walk the parsed tree
   invoke crown_walk
 
   # Next file
@@ -61,63 +159,438 @@ define crown_run_all [
   return
 ]
 
-# === Tree walker: process statements until END or BLOCK_END ===
+# compute_dirname: register 50 = file path, sets register 12 = dirname
+define compute_dirname [
+  register_get 50
+  string_length
+  register_to 51
+  register_get 51
+  subtract 1
+  register_to 52
 
+  label cd_scan
+  register_get 52
+  compare_lt 0
+  jump_if cd_dot
+
+  register_get 50
+  push
+  register_get 52
+  string_char_at
+  compare_eq 47
+  jump_if cd_found
+
+  register_get 52
+  subtract 1
+  register_to 52
+  jump cd_scan
+
+  label cd_found
+  register_get 52
+  compare_eq 0
+  jump_if cd_dot
+  register_get 50
+  push
+  value 0
+  push
+  register_get 52
+  string_slice
+  register_to 12
+  return
+
+  label cd_dot
+  string '.'
+  register_to 12
+  return
+]
+
+# === Tree walker with error checking and macro expansion ===
 define crown_walk [
   label cw_loop
-  tree_type
+  # Check error flag
+  register_get 40
+  compare_eq 1
+  jump_if cw_done
 
+  tree_type
   compare_eq 0
   jump_if cw_done
-
   compare_eq 2
   jump_if cw_done
-
   compare_eq 3
   jump_if cw_skip
 
+  # Command token (word or string)
   compare_eq 4
-  jump_if cw_dispatch
-
+  jump_if cw_pre_dispatch
   compare_eq 5
-  jump_if cw_dispatch
+  jump_if cw_pre_dispatch
 
   label cw_skip
   tree_advance
   jump cw_loop
 
-  label cw_dispatch
+  label cw_pre_dispatch
+  # Save statement start for possible macro expansion
+  tree_position
+  register_to 90
+
+  # Check for macro in this statement
+  invoke scan_for_macro
+  register_get 91
+  compare_eq 0
+  jump_if cw_no_macro
+
+  # === Macro expansion ===
+  value 0
+  register_to 92
+
+  label cw_macro_loop
+  register_get 91
+  push
+  register_get 92
+  compare_eq
+  jump_if cw_macro_done
+
+  invoke build_expanded_stmt
+
+  tree_save
+  register_get 93
+  tree_seek
+
   tree_value
   register_to 20
   tree_advance
 
+  register_get 20
+  string_compare '#'
+  jump_if cw_macro_comment
+
+  invoke crown_dispatch
+  invoke cw_skip_to_end
+
+  label cw_macro_next
+  tree_restore
+  register_get 92
+  add 1
+  register_to 92
+  jump cw_macro_loop
+
+  label cw_macro_comment
+  invoke cw_skip_to_end
+  jump cw_macro_next
+
+  label cw_macro_done
+  # Restore to original position and skip past the statement
+  register_get 90
+  tree_seek
+  invoke cw_skip_to_end
+  tree_advance
+  jump cw_loop
+
+  label cw_no_macro
+  # Normal dispatch
+  register_get 90
+  tree_seek
+  tree_value
+  register_to 20
+  tree_advance
+
+  # Handle # comments
+  register_get 20
+  string_compare '#'
+  jump_if cw_comment
+
   invoke crown_dispatch
 
   invoke cw_skip_to_end
+  tree_advance
+  jump cw_loop
+
+  label cw_comment
+  tree_type
+  compare_eq 3
+  jump_if cw_comment_done
+  compare_eq 0
+  jump_if cw_comment_done
+  compare_eq 2
+  jump_if cw_comment_done
+  tree_value
+  register_to 14
+  label cw_comment_done
+  invoke cw_skip_to_end
+  tree_advance
   jump cw_loop
 
   label cw_done
   return
 ]
 
-# === Skip to end of current statement ===
+# scan_for_macro: scan statement for MACRO_START, count elements
+# Input: tree cursor at statement start
+# Output: register 91 = element count (0 if no macro)
+define scan_for_macro [
+  value 0
+  register_to 91
 
+  label sfm_loop
+  tree_type
+  compare_eq 3
+  jump_if sfm_restore
+  compare_eq 0
+  jump_if sfm_restore
+  compare_eq 2
+  jump_if sfm_restore
+
+  compare_eq 6
+  jump_if sfm_found
+
+  compare_eq 1
+  jump_if sfm_skip_block
+
+  tree_advance
+  jump sfm_loop
+
+  label sfm_skip_block
+  tree_skip_block
+  jump sfm_loop
+
+  label sfm_found
+  tree_advance
+  value 1
+  register_to 91
+
+  label sfm_count
+  tree_type
+  compare_eq 7
+  jump_if sfm_restore
+  compare_eq 3
+  jump_if sfm_sep
+  tree_advance
+  jump sfm_count
+
+  label sfm_sep
+  register_get 91
+  add 1
+  register_to 91
+  tree_advance
+  jump sfm_count
+
+  label sfm_restore
+  register_get 90
+  tree_seek
+  return
+]
+
+# build_expanded_stmt: build tree buffer for macro element index
+# Input: register 90 = stmt start, register 92 = element index
+# Output: register 93 = tree buffer pointer
+define build_expanded_stmt [
+  value 8192
+  heap_alloc
+  register_to 93
+  register_to 95
+
+  register_get 90
+  register_to 94
+
+  label bes_loop
+  register_get 94
+  peek8
+  register_to 96
+
+  register_get 96
+  compare_eq 3
+  jump_if bes_finish
+  compare_eq 0
+  jump_if bes_finish
+  compare_eq 2
+  jump_if bes_finish
+
+  compare_eq 6
+  jump_if bes_macro
+
+  compare_eq 1
+  jump_if bes_copy_block
+
+  invoke copy_tree_node
+  jump bes_loop
+
+  label bes_macro
+  register_get 94
+  add 16
+  register_to 94
+
+  value 0
+  register_to 97
+
+  label bes_ms
+  register_get 92
+  push
+  register_get 97
+  compare_eq
+  jump_if bes_mf
+
+  label bes_mst
+  register_get 94
+  peek8
+  compare_eq 3
+  jump_if bes_mne
+  compare_eq 7
+  jump_if bes_mend
+  register_get 94
+  add 16
+  register_to 94
+  jump bes_mst
+
+  label bes_mne
+  register_get 94
+  add 16
+  register_to 94
+  register_get 97
+  add 1
+  register_to 97
+  jump bes_ms
+
+  label bes_mf
+  register_get 94
+  peek8
+  compare_eq 3
+  jump_if bes_mse
+  compare_eq 7
+  jump_if bes_mdone
+  invoke copy_tree_node
+  jump bes_mf
+
+  label bes_mse
+  label bes_mskip
+  register_get 94
+  peek8
+  compare_eq 7
+  jump_if bes_mdone
+  register_get 94
+  add 16
+  register_to 94
+  jump bes_mskip
+
+  label bes_mend
+  label bes_mdone
+  register_get 94
+  add 16
+  register_to 94
+  jump bes_loop
+
+  label bes_copy_block
+  invoke copy_tree_node
+  value 1
+  register_to 97
+
+  label bes_bl
+  register_get 94
+  peek8
+  compare_eq 1
+  jump_if bes_bi
+  compare_eq 2
+  jump_if bes_bd
+  invoke copy_tree_node
+  jump bes_bl
+
+  label bes_bi
+  register_get 97
+  add 1
+  register_to 97
+  invoke copy_tree_node
+  jump bes_bl
+
+  label bes_bd
+  register_get 97
+  subtract 1
+  register_to 97
+  invoke copy_tree_node
+  register_get 97
+  compare_eq 0
+  jump_if bes_loop
+  jump bes_bl
+
+  label bes_finish
+  register_get 95
+  push
+  value 3
+  poke8
+  register_get 95
+  add 8
+  push
+  value 0
+  poke8
+  register_get 95
+  add 16
+  push
+  value 0
+  poke8
+  register_get 95
+  add 24
+  push
+  value 0
+  poke8
+  return
+]
+
+# copy_tree_node: copy 16 bytes from reg94 to reg95, advance both
+define copy_tree_node [
+  register_get 94
+  peek8
+  register_to 96
+  register_get 95
+  push
+  register_get 96
+  poke8
+  register_get 94
+  add 8
+  peek8
+  register_to 96
+  register_get 95
+  add 8
+  push
+  register_get 96
+  poke8
+  register_get 94
+  add 16
+  register_to 94
+  register_get 95
+  add 16
+  register_to 95
+  return
+]
+
+# === Skip to end of current statement ===
 define cw_skip_to_end [
+  value 0
+  register_to 98
+
   label cwse_loop
   tree_type
+  compare_eq 6
+  jump_if cwse_macro_start
+  compare_eq 7
+  jump_if cwse_macro_end
 
+  # Only treat STMT_END/END/BLOCK_END as real end when not inside macro
+  register_get 98
+  compare_eq 0
+  jump_if_not cwse_in_macro
+
+  tree_type
   compare_eq 3
   jump_if cwse_done
-
   compare_eq 0
   jump_if cwse_done
-
   compare_eq 2
   jump_if cwse_done
 
+  label cwse_in_macro
+  tree_type
   compare_eq 1
   jump_if cwse_block
-
   tree_advance
   jump cwse_loop
 
@@ -125,28 +598,201 @@ define cw_skip_to_end [
   tree_skip_block
   jump cwse_loop
 
+  label cwse_macro_start
+  register_get 98
+  add 1
+  register_to 98
+  tree_advance
+  jump cwse_loop
+
+  label cwse_macro_end
+  register_get 98
+  subtract 1
+  register_to 98
+  tree_advance
+  jump cwse_loop
+
   label cwse_done
   return
 ]
 
-# === Command dispatch ===
+# === Truthy check: sets compare_flag 1 if register 16 is truthy ===
+define is_truthy [
+  register_get 16
+  typeof
+  string_compare 'undefined'
+  jump_if ist_false
 
+  register_get 16
+  typeof
+  string_compare 'boolean'
+  jump_if ist_bool
+
+  register_get 16
+  typeof
+  string_compare 'number'
+  jump_if ist_num
+
+  register_get 16
+  typeof
+  string_compare 'string'
+  jump_if ist_str
+
+  # null
+  register_get 16
+  typeof
+  string_compare 'null'
+  jump_if ist_false
+
+  # map, array, function = truthy
+  value 1
+  register_to 99
+  jump ist_set
+
+  label ist_bool
+  register_get 16
+  compare_eq 0
+  jump_if ist_false
+  value 1
+  register_to 99
+  jump ist_set
+
+  label ist_num
+  register_get 16
+  compare_eq 0
+  jump_if ist_false
+  value 1
+  register_to 99
+  jump ist_set
+
+  label ist_str
+  register_get 16
+  string_length
+  compare_eq 0
+  jump_if ist_false
+  value 1
+  register_to 99
+  jump ist_set
+
+  label ist_false
+  value 0
+  register_to 99
+
+  label ist_set
+  register_get 99
+  compare_eq 1
+  return
+]
+
+# === Scope chain lookup ===
+# Input: register 50 = key name
+# Output: register 16 = found value (or undefined)
+define scope_lookup [
+  register_get 11
+  register_to 51
+
+  label sl_loop
+  register_get 51
+  typeof
+  string_compare 'map'
+  jump_if_not sl_not_found
+
+  # Check if key exists in this scope
+  register_get 50
+  push
+  register_get 51
+  map_has_dynamic
+  jump_if sl_found
+
+  # Go to parent
+  register_get 51
+  map_get '__parent__'
+  register_to 51
+  jump sl_loop
+
+  label sl_found
+  register_get 50
+  push
+  register_get 51
+  map_get_dynamic
+  register_to 16
+  return
+
+  label sl_not_found
+  value 0
+  register_to 16
+  return
+]
+
+# === Command dispatch ===
 define crown_dispatch [
   register_get 20
-  string_compare 'log'
-  jump_if cd_log
-
-  register_get 20
-  string_compare 'value'
-  jump_if cd_value
+  string_compare 'get'
+  jump_if cd_get
 
   register_get 20
   string_compare 'set'
   jump_if cd_set
 
   register_get 20
-  string_compare 'get'
-  jump_if cd_get
+  string_compare 'value'
+  jump_if cd_value
+
+  register_get 20
+  string_compare 'call'
+  jump_if cd_call
+
+  register_get 20
+  string_compare 'function'
+  jump_if cd_function
+
+  register_get 20
+  string_compare 'log'
+  jump_if cd_log
+
+  register_get 20
+  string_compare 'true'
+  jump_if cd_true
+
+  register_get 20
+  string_compare 'false'
+  jump_if cd_false
+
+  register_get 20
+  string_compare 'is'
+  jump_if cd_is
+
+  register_get 20
+  string_compare '='
+  jump_if cd_is
+
+  register_get 20
+  string_compare '<'
+  jump_if cd_lt
+
+  register_get 20
+  string_compare '>'
+  jump_if cd_gt
+
+  register_get 20
+  string_compare '<='
+  jump_if cd_le
+
+  register_get 20
+  string_compare '>='
+  jump_if cd_ge
+
+  register_get 20
+  string_compare 'to'
+  jump_if cd_to
+
+  register_get 20
+  string_compare 'typeof'
+  jump_if cd_typeof
+
+  register_get 20
+  string_compare 'default'
+  jump_if cd_default
 
   register_get 20
   string_compare 'add'
@@ -168,62 +814,368 @@ define crown_dispatch [
   string_compare 'template'
   jump_if cd_template
 
-  # Unknown command - skip silently
-  return
+  register_get 20
+  string_compare 'it'
+  jump_if cd_it
 
-  label cd_log
-  invoke cr_log
-  return
+  register_get 20
+  string_compare 'current'
+  jump_if cd_it
 
-  label cd_value
-  invoke cr_value
-  return
+  register_get 20
+  string_compare 'do'
+  jump_if cd_do
 
-  label cd_set
-  invoke cr_set
+  register_get 20
+  string_compare 'not'
+  jump_if cd_not
+
+  register_get 20
+  string_compare 'all'
+  jump_if cd_all
+
+  register_get 20
+  string_compare 'any'
+  jump_if cd_any
+
+  register_get 20
+  string_compare 'list'
+  jump_if cd_list
+
+  register_get 20
+  string_compare 'object'
+  jump_if cd_object
+
+  register_get 20
+  string_compare 'at'
+  jump_if cd_at
+
+  register_get 20
+  string_compare 'entries'
+  jump_if cd_entries
+
+  register_get 20
+  string_compare 'clone'
+  jump_if cd_clone
+
+  register_get 20
+  string_compare 'names'
+  jump_if cd_names
+
+  register_get 20
+  string_compare 'unset'
+  jump_if cd_unset
+
+  register_get 20
+  string_compare 'try'
+  jump_if cd_try
+
+  register_get 20
+  string_compare 'error'
+  jump_if cd_error
+
+  register_get 20
+  string_compare 'clear_error'
+  jump_if cd_clear_error
+
+  register_get 20
+  string_compare 'get_error'
+  jump_if cd_get_error
+
+  register_get 20
+  string_compare 'current_error'
+  jump_if cd_current_error
+
+  register_get 20
+  string_compare 'pick'
+  jump_if cd_pick
+
+  register_get 20
+  string_compare 'loop'
+  jump_if cd_loop
+
+  register_get 20
+  string_compare 'drop'
+  jump_if cd_drop
+
+  register_get 20
+  string_compare 'keep'
+  jump_if cd_keep
+
+  register_get 20
+  string_compare 'map'
+  jump_if cd_map
+
+  register_get 20
+  string_compare 'filter'
+  jump_if cd_filter
+
+  register_get 20
+  string_compare 'each'
+  jump_if cd_each
+
+  register_get 20
+  string_compare 'find'
+  jump_if cd_find
+
+  register_get 20
+  string_compare 'group'
+  jump_if cd_group
+
+  register_get 20
+  string_compare 'load'
+  jump_if cd_load
+
+  register_get 20
+  string_compare 'point'
+  jump_if cd_point
+
+  register_get 20
+  string_compare 'will'
+  jump_if cd_will
+
+  register_get 20
+  string_compare 'tap'
+  jump_if cd_tap
+
+  register_get 20
+  string_compare 'tell'
+  jump_if cd_tell
+
+  register_get 20
+  string_compare 'comment'
+  jump_if cd_comment
+
+  register_get 20
+  string_compare 'new'
+  jump_if cd_new
+
+  register_get 20
+  string_compare 'global'
+  jump_if cd_global
+
+  register_get 20
+  string_compare 'scope'
+  jump_if cd_scope
+
+  register_get 20
+  string_compare 'push'
+  jump_if cd_push_cmd
+
+  register_get 20
+  string_compare 'run'
+  jump_if cd_run
+
+  register_get 20
+  string_compare 'walk'
+  jump_if cd_walk_cmd
+
+  register_get 20
+  string_compare 'set_raw'
+  jump_if cd_set
+
+  register_get 20
+  string_compare 'prepend'
+  jump_if cd_prepend
+
+  register_get 20
+  string_compare 'regexp'
+  jump_if cd_do
+
+  # Unknown command - error
+  invoke cr_unknown_cmd
   return
 
   label cd_get
   invoke cr_get
   return
-
+  label cd_set
+  invoke cr_set
+  return
+  label cd_value
+  invoke cr_value
+  return
+  label cd_call
+  invoke cr_call
+  return
+  label cd_function
+  invoke cr_function
+  return
+  label cd_log
+  invoke cr_log
+  return
+  label cd_true
+  invoke cr_true
+  return
+  label cd_false
+  invoke cr_false
+  return
+  label cd_is
+  invoke cr_is
+  return
+  label cd_lt
+  invoke cr_lt
+  return
+  label cd_gt
+  invoke cr_gt
+  return
+  label cd_le
+  invoke cr_le
+  return
+  label cd_ge
+  invoke cr_ge
+  return
+  label cd_to
+  invoke cr_to
+  return
+  label cd_typeof
+  invoke cr_typeof
+  return
+  label cd_default
+  invoke cr_default
+  return
   label cd_add
   invoke cr_add
   return
-
   label cd_subtract
   invoke cr_subtract
   return
-
   label cd_multiply
   invoke cr_multiply
   return
-
   label cd_divide
   invoke cr_divide
   return
-
   label cd_template
   invoke cr_template
+  return
+  label cd_it
+  return
+  label cd_do
+  return
+  label cd_not
+  invoke cr_not
+  return
+  label cd_all
+  invoke cr_all
+  return
+  label cd_any
+  invoke cr_any
+  return
+  label cd_list
+  invoke cr_list
+  return
+  label cd_object
+  invoke cr_object
+  return
+  label cd_at
+  invoke cr_at
+  return
+  label cd_entries
+  invoke cr_entries
+  return
+  label cd_clone
+  invoke cr_clone
+  return
+  label cd_names
+  invoke cr_names
+  return
+  label cd_unset
+  invoke cr_unset
+  return
+  label cd_try
+  invoke cr_try
+  return
+  label cd_error
+  invoke cr_error
+  return
+  label cd_clear_error
+  value 0
+  register_to 40
+  return
+  label cd_get_error
+  invoke cr_get_error
+  return
+  label cd_current_error
+  invoke cr_current_error
+  return
+  label cd_pick
+  invoke cr_pick
+  return
+  label cd_loop
+  invoke cr_loop
+  return
+  label cd_drop
+  invoke cr_drop
+  return
+  label cd_keep
+  invoke cr_keep
+  return
+  label cd_map
+  invoke cr_map
+  return
+  label cd_filter
+  invoke cr_filter
+  return
+  label cd_each
+  invoke cr_each
+  return
+  label cd_find
+  invoke cr_find
+  return
+  label cd_group
+  invoke cr_group
+  return
+  label cd_load
+  invoke cr_load
+  return
+  label cd_point
+  invoke cr_point
+  return
+  label cd_will
+  invoke cr_will
+  return
+  label cd_tap
+  invoke cr_tap
+  return
+  label cd_tell
+  invoke cr_tell
+  return
+  label cd_comment
+  register_get 14
+  register_to 16
+  return
+  label cd_new
+  invoke cr_new
+  return
+  label cd_global
+  invoke cr_global
+  return
+  label cd_scope
+  return
+  label cd_push_cmd
+  invoke cr_push_cmd
+  return
+  label cd_run
+  invoke cr_run
+  return
+  label cd_walk_cmd
+  invoke cr_walk_cmd
+  return
+  label cd_prepend
+  invoke cr_prepend
   return
 ]
 
 # === Evaluate next argument from tree ===
-# Sets register 16 to the evaluated value
-
 define cr_eval_arg [
   tree_type
-
   compare_eq 5
   jump_if cea_str
-
   compare_eq 4
   jump_if cea_word
-
   compare_eq 1
   jump_if cea_block
-
-  # STMT_END or other: no arg
   return
 
   label cea_str
@@ -235,34 +1187,51 @@ define cr_eval_arg [
   label cea_word
   tree_value
   register_to 22
+
+  # Check keywords
+  register_get 22
+  string_compare 'true'
+  jump_if cea_true
+  register_get 22
+  string_compare 'false'
+  jump_if cea_false
+  register_get 22
+  string_compare 'null'
+  jump_if cea_null
+  register_get 22
+  string_compare 'undefined'
+  jump_if cea_undef
+
   # Try parse as number
-  to_number
-  # Check if original string starts with a digit or minus
   register_get 22
   push
   value 0
   string_char_at
   register_to 23
 
-  # Check if char is digit (48-57) or minus (45)
   register_get 23
   compare_gt 47
   jump_if_not cea_var
-
   register_get 23
   compare_lt 58
   jump_if cea_is_num
 
   register_get 23
   compare_eq 45
+  jump_if cea_check_neg
+
+  jump cea_var
+
+  label cea_check_neg
+  register_get 22
+  string_length
+  compare_gt 1
   jump_if cea_is_num
+  jump cea_var
 
   label cea_var
-  # Variable lookup
+  # Literal string value (NOT a variable lookup)
   register_get 22
-  push
-  register_get 11
-  map_get_dynamic
   register_to 16
   tree_advance
   return
@@ -274,134 +1243,1013 @@ define cr_eval_arg [
   tree_advance
   return
 
+  label cea_true
+  value 1
+  register_to 16
+  tree_advance
+  return
+
+  label cea_false
+  value 0
+  register_to 16
+  tree_advance
+  return
+
+  label cea_null
+  # type 1 = null
+  register_set 16 0
+  tree_advance
+  return
+
+  label cea_undef
+  value 0
+  register_to 16
+  tree_advance
+  return
+
   label cea_block
   tree_advance
+  # Save scope
+  register_get 11
+  register_to 55
+
+  # Clone scope for block evaluation
+  map_new
+  register_to 56
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 56
+  map_set_dynamic
+
+  # Copy currentValue to clone
+  register_get 16
+  push
+  string '__cv__'
+  push
+  register_get 56
+  map_set_dynamic
+
+  register_get 56
+  register_to 11
+  register_get 16
+  push
+  string '__cv__'
+  push
+  register_get 11
+  map_set_dynamic
+
   invoke crown_walk
   tree_advance
+
+  # Restore scope
+  register_get 55
+  register_to 11
+  return
+]
+
+# cr_unknown_cmd: handle unknown command as error
+define cr_unknown_cmd [
+  # Set error: "X is not a valid operation"
+  string_new
+  register_get 20
+  string_append_buf
+  string ' is not a valid operation'
+  string_append_buf
+  string_finish
+  register_to 41
+  value 1
+  register_to 40
   return
 ]
 
 # === Crown command: value ===
-
 define cr_value [
   invoke cr_eval_arg
   return
 ]
 
-# === Crown command: log ===
-
-define cr_log [
-  tree_type
-
-  compare_eq 3
-  jump_if crl_cur
-
-  compare_eq 2
-  jump_if crl_cur
-
-  compare_eq 0
-  jump_if crl_cur
-
-  # Has arguments - print them space-separated
-  label crl_args
-  tree_type
-  compare_eq 3
-  jump_if crl_nl
-  compare_eq 2
-  jump_if crl_nl
-  compare_eq 0
-  jump_if crl_nl
-
-  compare_eq 1
-  jump_if crl_skip_block
-
+# === Crown command: get ===
+define cr_get [
   tree_value
-  print
+  register_to 50
   tree_advance
 
+  invoke scope_lookup
+
+  # Check for additional segments (get obj key key2)
+  label crget_seg
   tree_type
   compare_eq 3
-  jump_if crl_nl
+  jump_if crget_done
+  compare_eq 0
+  jump_if crget_done
   compare_eq 2
-  jump_if crl_nl
+  jump_if crget_done
 
-  value 32
-  print_char
-  jump crl_args
+  # More segments = property access
+  invoke cr_eval_arg
+  register_to 52
 
-  label crl_skip_block
-  tree_skip_block
-  jump crl_args
-
-  label crl_nl
-  print_newline
-  return
-
-  label crl_cur
-  # Print crown current value with console.dir parity
+  # Get property from current value (which should be a map)
   register_get 16
   typeof
-  string_compare 'string'
-  jump_if crl_str
+  string_compare 'map'
+  jump_if_not crget_done
 
-  # Number or other: just print
+  register_get 52
+  push
   register_get 16
-  print
-  print_newline
-  return
+  register_to 53
+  map_get_dynamic
+  register_to 16
+  jump crget_seg
 
-  label crl_str
-  value 39
-  print_char
-  register_get 16
-  print
-  value 39
-  print_char
-  print_newline
+  label crget_done
   return
 ]
 
-# === Crown command: set <name> <value> ===
-
+# === Crown command: set ===
 define cr_set [
+  # Read first arg (variable name or path start)
   tree_value
   register_to 18
   tree_advance
 
+  # Check if there are more args (path or value)
+  tree_type
+  compare_eq 3
+  jump_if crset_novalue
+  compare_eq 0
+  jump_if crset_novalue
+  compare_eq 2
+  jump_if crset_novalue
+
+  # Check if second arg is followed by third (set obj key value)
+  tree_position
+  register_to 55
+  invoke cr_eval_arg
+  register_to 56
+
+  tree_type
+  compare_eq 3
+  jump_if crset_simple
+  compare_eq 0
+  jump_if crset_simple
+  compare_eq 2
+  jump_if crset_simple
+
+  # Has third arg: set path key value
+  # register 18 = object name, 56 = key, eval third = value
   invoke cr_eval_arg
 
-  # Push value first (will be popped second by map_set_dynamic)
+  # Look up the object
+  register_get 18
+  register_to 50
+  register_get 11
+  register_to 57
   register_get 16
-  push
-  # Push key (variable name) second (will be popped first)
+  register_to 58
+
+  # Find scope containing object
+  register_get 57
+  typeof
+  string_compare 'map'
+  jump_if_not crset_done
+
   register_get 18
   push
-  # Set in current scope
-  register_get 11
+  register_get 57
+  map_has_dynamic
+  jump_if crset_path_found
+
+  register_get 57
+  map_get '__parent__'
+  register_to 57
+  jump crset_done
+
+  label crset_path_found
+  register_get 18
+  push
+  register_get 57
+  map_get_dynamic
+  register_to 59
+
+  # Set property on the object
+  register_get 59
+  typeof
+  string_compare 'map'
+  jump_if_not crset_done
+
+  register_get 58
+  push
+  register_get 56
+  push
+  register_get 59
   map_set_dynamic
-  return
-]
+  jump crset_done
 
-# === Crown command: get <name> ===
-
-define cr_get [
-  tree_value
+  label crset_simple
+  # Simple set: name = value
+  register_get 56
+  push
+  register_get 18
   push
   register_get 11
-  map_get_dynamic
-  register_to 16
-  tree_advance
+  map_set_dynamic
+  jump crset_done
+
+  label crset_novalue
+  register_get 16
+  push
+  register_get 18
+  push
+  register_get 11
+  map_set_dynamic
+
+  label crset_done
   return
 ]
 
-# === Crown command: add <value> ===
+# === Crown command: to ===
+define cr_to [
+  # Read variable name(s)
+  tree_value
+  register_to 18
+  tree_advance
 
+  # Check for path segments
+  tree_type
+  compare_eq 3
+  jump_if crto_simple
+  compare_eq 0
+  jump_if crto_simple
+  compare_eq 2
+  jump_if crto_simple
+
+  # Has more args: to obj key - set obj.key = currentValue
+  tree_value
+  register_to 55
+  tree_advance
+
+  # Lookup object
+  register_get 18
+  register_to 50
+  register_get 16
+  register_to 56
+  invoke scope_lookup
+
+  register_get 16
+  typeof
+  string_compare 'map'
+  jump_if_not crto_done
+
+  register_get 56
+  push
+  register_get 55
+  push
+  register_get 16
+  map_set_dynamic
+  register_get 56
+  register_to 16
+  jump crto_done
+
+  label crto_simple
+  register_get 16
+  push
+  register_get 18
+  push
+  register_get 11
+  map_set_dynamic
+
+  label crto_done
+  return
+]
+
+# === Crown command: function ===
+define cr_function [
+  # Collect parameter names until block
+  array_new
+  register_to 50
+
+  label crfn_params
+  tree_type
+  compare_eq 1
+  jump_if crfn_body
+  compare_eq 3
+  jump_if crfn_no_body
+  compare_eq 0
+  jump_if crfn_no_body
+
+  tree_value
+  push
+  register_get 50
+  array_push
+
+  tree_advance
+  jump crfn_params
+
+  label crfn_body
+  tree_position
+  register_to 51
+
+  tree_skip_block
+
+  # Create function map
+  map_new
+  register_to 52
+
+  # Set __fn_body
+  register_get 51
+  push
+  string '__fn_body'
+  push
+  register_get 52
+  map_set_dynamic
+
+  # Set __fn_scope
+  register_get 11
+  push
+  string '__fn_scope'
+  push
+  register_get 52
+  map_set_dynamic
+
+  # Set __fn_params
+  register_get 50
+  push
+  string '__fn_params'
+  push
+  register_get 52
+  map_set_dynamic
+
+  # Set __fn_bpath
+  register_get 12
+  push
+  string '__fn_bpath'
+  push
+  register_get 52
+  map_set_dynamic
+
+  register_get 52
+  register_to 16
+  return
+
+  label crfn_no_body
+  value 0
+  register_to 16
+  return
+]
+
+# === Crown command: call ===
+define cr_call [
+  # currentValue (reg 16) should be a function map
+  register_get 16
+  register_to 60
+
+  # Check if it is a function (has __fn_body or __fn_native)
+  register_get 60
+  typeof
+  string_compare 'map'
+  jump_if crcall_ok
+
+  # Not a function - error
+  string_new
+  string 'Expecting value to be a function, but got: '
+  string_append_buf
+  register_get 16
+  typeof
+  string_append_buf
+  string_finish
+  register_to 41
+  value 1
+  register_to 40
+  return
+
+  label crcall_ok
+  # Check for __fn_native
+  register_get 60
+  map_has '__fn_native'
+  jump_if crcall_native
+
+  # Regular function call
+  register_get 60
+  map_get '__fn_body'
+  register_to 61
+
+  register_get 60
+  map_get '__fn_scope'
+  register_to 62
+
+  register_get 60
+  map_get '__fn_params'
+  register_to 63
+
+  register_get 60
+  map_get '__fn_bpath'
+  register_to 64
+
+  # Clone captured scope
+  map_new
+  register_to 65
+  register_get 62
+  push
+  string '__parent__'
+  push
+  register_get 65
+  map_set_dynamic
+
+  # Evaluate arguments and bind to params
+  value 0
+  register_to 66
+
+  label crcall_args
+  tree_type
+  compare_eq 3
+  jump_if crcall_exec
+  compare_eq 0
+  jump_if crcall_exec
+  compare_eq 2
+  jump_if crcall_exec
+
+  # Check for spread
+  tree_type
+  compare_eq 4
+  jump_if_not crcall_eval_arg
+  tree_value
+  string_compare '*'
+  jump_if crcall_spread
+
+  label crcall_eval_arg
+  invoke cr_eval_arg
+
+  # Bind to param name at index
+  register_get 63
+  push
+  register_get 66
+  array_get
+  register_to 67
+
+  register_get 67
+  typeof
+  string_compare 'undefined'
+  jump_if crcall_next_arg
+
+  register_get 16
+  push
+  register_get 67
+  push
+  register_get 65
+  map_set_dynamic
+
+  label crcall_next_arg
+  register_get 66
+  add 1
+  register_to 66
+  jump crcall_args
+
+  label crcall_spread
+  tree_advance
+  invoke cr_eval_arg
+  register_to 68
+
+  # Spread array elements as arguments
+  register_get 68
+  typeof
+  string_compare 'array'
+  jump_if_not crcall_args
+
+  register_get 68
+  array_length
+  register_to 69
+  value 0
+  register_to 70
+
+  label crcall_spread_loop
+  register_get 69
+  push
+  register_get 70
+  compare_eq
+  jump_if crcall_args
+
+  register_get 68
+  push
+  register_get 70
+  array_get
+  register_to 71
+
+  register_get 63
+  push
+  register_get 66
+  array_get
+  register_to 67
+
+  register_get 67
+  typeof
+  string_compare 'undefined'
+  jump_if crcall_spread_next
+
+  register_get 71
+  push
+  register_get 67
+  push
+  register_get 65
+  map_set_dynamic
+
+  label crcall_spread_next
+  register_get 66
+  add 1
+  register_to 66
+  register_get 70
+  add 1
+  register_to 70
+  jump crcall_spread_loop
+
+  label crcall_exec
+  # Save state
+  register_get 11
+  register_to 55
+  register_get 12
+  register_to 56
+  register_get 40
+  register_to 57
+
+  # Set function scope and basePath
+  register_get 65
+  register_to 11
+  register_get 64
+  typeof
+  string_compare 'string'
+  jump_if_not crcall_walk
+  register_get 64
+  register_to 12
+
+  label crcall_walk
+  value 0
+  register_to 40
+
+  # Save and seek to function body
+  tree_save
+  register_get 61
+  tree_seek
+  tree_advance
+
+  invoke crown_walk
+
+  tree_restore
+
+  # Check for errors from function
+  register_get 40
+  compare_eq 1
+  jump_if crcall_error
+
+  # Restore state
+  register_get 55
+  register_to 11
+  register_get 56
+  register_to 12
+  # currentValue (reg 16) holds the function result
+  return
+
+  label crcall_error
+  # Propagate error, restore state
+  register_get 55
+  register_to 11
+  register_get 56
+  register_to 12
+  value 0
+  register_to 16
+  return
+
+  label crcall_native
+  # Native function call
+  register_get 60
+  map_get '__fn_native'
+  register_to 70
+
+  # Collect arguments into array
+  array_new
+  register_to 71
+
+  label crcall_native_args
+  tree_type
+  compare_eq 3
+  jump_if crcall_native_exec
+  compare_eq 0
+  jump_if crcall_native_exec
+  compare_eq 2
+  jump_if crcall_native_exec
+
+  invoke cr_eval_arg
+  push
+  register_get 71
+  array_push
+  jump crcall_native_args
+
+  label crcall_native_exec
+  invoke native_dispatch
+  return
+]
+
+# === Crown command: true ===
+define cr_true [
+  tree_type
+  compare_eq 1
+  jump_if crtrue_block
+
+  # No block: set currentValue = true (boolean)
+  value 1
+  register_to 16
+  return
+
+  label crtrue_block
+  invoke is_truthy
+  jump_if_not crtrue_skip
+
+  # Clone scope, walk block
+  register_get 11
+  register_to 55
+  register_get 16
+  register_to 56
+
+  map_new
+  register_to 57
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 57
+  map_set_dynamic
+
+  register_get 57
+  register_to 11
+
+  tree_advance
+  invoke crown_walk
+  tree_advance
+
+  # Check for error propagation
+  register_get 40
+  compare_eq 1
+  jump_if crtrue_restore
+
+  label crtrue_restore
+  register_get 55
+  register_to 11
+  register_get 56
+  register_to 16
+  return
+
+  label crtrue_skip
+  tree_skip_block
+  return
+]
+
+# === Crown command: false ===
+define cr_false [
+  tree_type
+  compare_eq 1
+  jump_if crfalse_block
+
+  # No block: set currentValue = false (boolean)
+  value 0
+  register_to 16
+  return
+
+  label crfalse_block
+  invoke is_truthy
+  jump_if crfalse_skip
+
+  # Clone scope, walk block (currentValue is falsy)
+  register_get 11
+  register_to 55
+  register_get 16
+  register_to 56
+
+  map_new
+  register_to 57
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 57
+  map_set_dynamic
+
+  register_get 57
+  register_to 11
+
+  tree_advance
+  invoke crown_walk
+  tree_advance
+
+  register_get 55
+  register_to 11
+  register_get 56
+  register_to 16
+  return
+
+  label crfalse_skip
+  tree_skip_block
+  return
+]
+
+# === Crown command: is ===
+define cr_is [
+  register_get 16
+  register_to 55
+  invoke cr_eval_arg
+  register_to 56
+
+  # Compare type first
+  register_get 55
+  typeof
+  register_to 57
+  register_get 56
+  typeof
+  register_to 58
+
+  register_get 57
+  push
+  register_get 58
+  string_compare
+  jump_if_not cris_neq
+
+  # Same type - compare values
+  register_get 57
+  string_compare 'string'
+  jump_if cris_str
+
+  register_get 57
+  string_compare 'undefined'
+  jump_if cris_eq
+
+  register_get 57
+  string_compare 'null'
+  jump_if cris_eq
+
+  # Compare as integers/values
+  register_get 56
+  push
+  register_get 55
+  compare_eq
+  jump_if cris_eq
+  jump cris_neq
+
+  label cris_str
+  register_get 55
+  push
+  register_get 56
+  string_compare
+  jump_if cris_eq
+  jump cris_neq
+
+  label cris_eq
+  value 1
+  register_to 16
+  return
+
+  label cris_neq
+  value 0
+  register_to 16
+  return
+]
+
+# === Comparison commands ===
+define cr_lt [
+  register_get 16
+  register_to 55
+  invoke cr_eval_arg
+  register_to 56
+  register_get 56
+  push
+  register_get 55
+  compare_lt
+  jump_if crlt_yes
+  value 0
+  register_to 16
+  return
+  label crlt_yes
+  value 1
+  register_to 16
+  return
+]
+
+define cr_gt [
+  register_get 16
+  register_to 55
+  invoke cr_eval_arg
+  register_to 56
+  register_get 56
+  push
+  register_get 55
+  compare_gt
+  jump_if crgt_yes
+  value 0
+  register_to 16
+  return
+  label crgt_yes
+  value 1
+  register_to 16
+  return
+]
+
+define cr_le [
+  register_get 16
+  register_to 55
+  invoke cr_eval_arg
+  register_to 56
+  register_get 56
+  push
+  register_get 55
+  compare_gt
+  jump_if crle_no
+  value 1
+  register_to 16
+  return
+  label crle_no
+  value 0
+  register_to 16
+  return
+]
+
+define cr_ge [
+  register_get 16
+  register_to 55
+  invoke cr_eval_arg
+  register_to 56
+  register_get 56
+  push
+  register_get 55
+  compare_lt
+  jump_if crge_no
+  value 1
+  register_to 16
+  return
+  label crge_no
+  value 0
+  register_to 16
+  return
+]
+
+# === Crown command: typeof ===
+define cr_typeof [
+  # Check for arguments (error if any)
+  tree_type
+  compare_eq 3
+  jump_if crty_ok
+  compare_eq 0
+  jump_if crty_ok
+  compare_eq 2
+  jump_if crty_ok
+
+  # Has arguments - error
+  string_new
+  string 'typeof command does not accept arguments, got 1'
+  string_append_buf
+  string_finish
+  register_to 41
+  value 1
+  register_to 40
+  return
+
+  label crty_ok
+  register_get 16
+  typeof
+
+  # Check for function (map with __fn_body or __fn_native)
+  string_compare 'map'
+  jump_if_not crty_set
+
+  register_get 16
+  map_has '__fn_body'
+  jump_if crty_fn
+  register_get 16
+  map_has '__fn_native'
+  jump_if crty_fn
+
+  string 'object'
+  register_to 16
+  return
+
+  label crty_fn
+  string 'function'
+  register_to 16
+  return
+
+  label crty_set
+  register_get 16
+  typeof
+  # For arrays, typeof should be 'object' in JS
+  string_compare 'array'
+  jump_if crty_obj
+
+  register_get 16
+  typeof
+  register_to 16
+  return
+
+  label crty_obj
+  string 'object'
+  register_to 16
+  return
+]
+
+# === Crown command: default ===
+define cr_default [
+  register_get 16
+  typeof
+  string_compare 'undefined'
+  jump_if crdef_replace
+
+  register_get 16
+  typeof
+  string_compare 'null'
+  jump_if crdef_replace
+
+  # Keep current
+  invoke cw_skip_to_end
+  return
+
+  label crdef_replace
+  invoke cr_eval_arg
+  return
+]
+
+# === Crown command: not ===
+define cr_not [
+  invoke is_truthy
+  jump_if crnot_false
+  value 1
+  register_to 16
+  return
+  label crnot_false
+  value 0
+  register_to 16
+  return
+]
+
+# === Crown command: all ===
+define cr_all [
+  value 1
+  register_to 55
+
+  label crall_loop
+  tree_type
+  compare_eq 3
+  jump_if crall_done
+  compare_eq 0
+  jump_if crall_done
+  compare_eq 2
+  jump_if crall_done
+
+  invoke cr_eval_arg
+  invoke is_truthy
+  jump_if crall_loop
+
+  value 0
+  register_to 55
+
+  label crall_done
+  register_get 55
+  register_to 16
+  return
+]
+
+# === Crown command: any ===
+define cr_any [
+  value 0
+  register_to 55
+
+  label crany_loop
+  tree_type
+  compare_eq 3
+  jump_if crany_done
+  compare_eq 0
+  jump_if crany_done
+  compare_eq 2
+  jump_if crany_done
+
+  invoke cr_eval_arg
+  invoke is_truthy
+  jump_if crany_found
+  jump crany_loop
+
+  label crany_found
+  value 1
+  register_to 55
+
+  label crany_done
+  register_get 55
+  register_to 16
+  return
+]
+
+# === Arithmetic commands ===
 define cr_add [
   register_get 16
   register_to 17
-
   invoke cr_eval_arg
-
   register_get 16
   push
   register_get 17
@@ -410,14 +2258,10 @@ define cr_add [
   return
 ]
 
-# === Crown command: subtract <value> ===
-
 define cr_subtract [
   register_get 16
   register_to 17
-
   invoke cr_eval_arg
-
   register_get 16
   push
   register_get 17
@@ -426,14 +2270,10 @@ define cr_subtract [
   return
 ]
 
-# === Crown command: multiply <value> ===
-
 define cr_multiply [
   register_get 16
   register_to 17
-
   invoke cr_eval_arg
-
   register_get 16
   push
   register_get 17
@@ -442,14 +2282,10 @@ define cr_multiply [
   return
 ]
 
-# === Crown command: divide <value> ===
-
 define cr_divide [
   register_get 16
   register_to 17
-
   invoke cr_eval_arg
-
   register_get 16
   push
   register_get 17
@@ -458,61 +2294,2241 @@ define cr_divide [
   return
 ]
 
-# === Crown command: template 'format' [arg0] [arg1] ... ===
+# === Crown command: list ===
+define cr_list [
+  array_new
+  register_to 16
 
+  tree_type
+  compare_eq 1
+  jump_if crlist_block
+
+  # Args mode: push each arg
+  label crlist_args
+  tree_type
+  compare_eq 3
+  jump_if crlist_done
+  compare_eq 0
+  jump_if crlist_done
+  compare_eq 2
+  jump_if crlist_done
+
+  register_get 16
+  register_to 55
+  invoke cr_eval_arg
+  push
+  register_get 55
+  array_push
+  register_get 55
+  register_to 16
+  jump crlist_args
+
+  label crlist_block
+  # Block mode: each statement defines an item
+  register_get 16
+  register_to 55
+
+  tree_advance
+
+  label crlist_block_loop
+  tree_type
+  compare_eq 2
+  jump_if crlist_block_done
+  compare_eq 0
+  jump_if crlist_block_done
+
+  # Evaluate item
+  compare_eq 1
+  jump_if crlist_block_eval
+
+  compare_eq 4
+  jump_if crlist_block_word
+  compare_eq 5
+  jump_if crlist_block_str
+
+  tree_advance
+  jump crlist_block_loop
+
+  label crlist_block_word
+  tree_value
+  register_to 56
+  register_get 56
+  string_compare 'true'
+  jump_if crlist_push_true
+  register_get 56
+  string_compare 'false'
+  jump_if crlist_push_false
+  register_get 56
+  string_compare 'null'
+  jump_if crlist_push_null
+  register_get 56
+  to_number
+  register_to 16
+  push
+  register_get 55
+  array_push
+  register_get 55
+  register_to 16
+  tree_advance
+  invoke cw_skip_to_end
+  tree_type
+  compare_eq 3
+  jump_if_not crlist_block_loop
+  tree_advance
+  jump crlist_block_loop
+
+  label crlist_push_true
+  value 1
+  push
+  register_get 55
+  array_push
+  register_get 55
+  register_to 16
+  tree_advance
+  invoke cw_skip_to_end
+  tree_type
+  compare_eq 3
+  jump_if_not crlist_block_loop
+  tree_advance
+  jump crlist_block_loop
+
+  label crlist_push_false
+  value 0
+  push
+  register_get 55
+  array_push
+  register_get 55
+  register_to 16
+  tree_advance
+  invoke cw_skip_to_end
+  tree_type
+  compare_eq 3
+  jump_if_not crlist_block_loop
+  tree_advance
+  jump crlist_block_loop
+
+  label crlist_push_null
+  register_set 16 0
+  push
+  register_get 55
+  array_push
+  register_get 55
+  register_to 16
+  tree_advance
+  invoke cw_skip_to_end
+  tree_type
+  compare_eq 3
+  jump_if_not crlist_block_loop
+  tree_advance
+  jump crlist_block_loop
+
+  label crlist_block_str
+  tree_value
+  push
+  register_get 55
+  array_push
+  register_get 55
+  register_to 16
+  tree_advance
+  invoke cw_skip_to_end
+  tree_type
+  compare_eq 3
+  jump_if_not crlist_block_loop
+  tree_advance
+  jump crlist_block_loop
+
+  label crlist_block_eval
+  # Block item: evaluate in clone
+  register_get 11
+  register_to 57
+
+  map_new
+  register_to 58
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 58
+  map_set_dynamic
+  register_get 58
+  register_to 11
+
+  tree_advance
+  invoke crown_walk
+  tree_advance
+
+  register_get 57
+  register_to 11
+
+  register_get 16
+  push
+  register_get 55
+  array_push
+  register_get 55
+  register_to 16
+
+  tree_type
+  compare_eq 3
+  jump_if_not crlist_block_loop
+  tree_advance
+  jump crlist_block_loop
+
+  label crlist_block_done
+  tree_advance
+  register_get 55
+  register_to 16
+  return
+
+  label crlist_done
+  return
+]
+
+# === Crown command: object ===
+define cr_object [
+  map_new
+  register_to 16
+
+  tree_type
+  compare_eq 1
+  jump_if_not crobj_done
+
+  register_get 16
+  register_to 55
+
+  tree_advance
+
+  label crobj_loop
+  tree_type
+  compare_eq 2
+  jump_if crobj_end
+  compare_eq 0
+  jump_if crobj_end
+
+  # Read key
+  compare_eq 4
+  jump_if crobj_key
+  compare_eq 5
+  jump_if crobj_key
+
+  tree_advance
+  jump crobj_loop
+
+  label crobj_key
+  tree_value
+  register_to 56
+  tree_advance
+
+  # Check what follows: value or end of entry
+  tree_type
+  compare_eq 3
+  jump_if crobj_shorthand
+  compare_eq 2
+  jump_if crobj_shorthand
+
+  # Has value
+  compare_eq 1
+  jump_if crobj_block_val
+
+  # Literal value
+  invoke cr_eval_arg
+  register_to 57
+
+  register_get 57
+  push
+  register_get 56
+  push
+  register_get 55
+  map_set_dynamic
+  register_get 55
+  register_to 16
+
+  invoke cw_skip_to_end
+  tree_type
+  compare_eq 3
+  jump_if_not crobj_loop
+  tree_advance
+  jump crobj_loop
+
+  label crobj_block_val
+  # Evaluate block in clone
+  register_get 11
+  register_to 57
+  map_new
+  register_to 58
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 58
+  map_set_dynamic
+  register_get 58
+  register_to 11
+
+  tree_advance
+  invoke crown_walk
+  tree_advance
+
+  register_get 57
+  register_to 11
+
+  register_get 16
+  push
+  register_get 56
+  push
+  register_get 55
+  map_set_dynamic
+  register_get 55
+  register_to 16
+
+  invoke cw_skip_to_end
+  tree_type
+  compare_eq 3
+  jump_if_not crobj_loop
+  tree_advance
+  jump crobj_loop
+
+  label crobj_shorthand
+  # Shorthand: key only = lookup from scope
+  register_get 56
+  register_to 50
+  invoke scope_lookup
+
+  register_get 16
+  push
+  register_get 56
+  push
+  register_get 55
+  map_set_dynamic
+  register_get 55
+  register_to 16
+
+  tree_type
+  compare_eq 3
+  jump_if_not crobj_loop
+  tree_advance
+  jump crobj_loop
+
+  label crobj_end
+  tree_advance
+  register_get 55
+  register_to 16
+
+  label crobj_done
+  return
+]
+
+# === Crown command: at ===
+define cr_at [
+  label crat_loop
+  tree_type
+  compare_eq 3
+  jump_if crat_done
+  compare_eq 0
+  jump_if crat_done
+  compare_eq 2
+  jump_if crat_done
+
+  # Save object (cr_eval_arg overwrites 16 with property name)
+  register_get 16
+  register_to 54
+  invoke cr_eval_arg
+  register_to 55
+  register_get 54
+  register_to 16
+
+  # Access property on currentValue
+  register_get 16
+  typeof
+  string_compare 'map'
+  jump_if crat_map
+
+  register_get 16
+  typeof
+  string_compare 'array'
+  jump_if crat_array
+
+  register_get 16
+  typeof
+  string_compare 'string'
+  jump_if crat_string
+
+  # null/undefined - error
+  register_get 16
+  typeof
+  string_compare 'null'
+  jump_if crat_null_err
+
+  register_get 16
+  typeof
+  string_compare 'undefined'
+  jump_if crat_null_err
+
+  register_get 16
+  typeof
+  string_compare 'number'
+  jump_if crat_number
+
+  value 0
+  register_to 16
+  return
+
+  label crat_number
+  # Date instance (epoch number): toLocaleString and getMinutes supported
+  register_get 55
+  string_compare 'toLocaleString'
+  jump_if crat_date_tolocale
+  register_get 55
+  string_compare 'getMinutes'
+  jump_if crat_date_getminutes
+  value 0
+  register_to 16
+  return
+
+  label crat_date_tolocale
+  invoke make_native_fn
+  return
+
+  label crat_date_getminutes
+  invoke make_native_fn
+  return
+
+  label crat_map
+  register_get 55
+  push
+  register_get 16
+  register_to 56
+  map_get_dynamic
+  register_to 16
+  jump crat_loop
+
+  label crat_array
+  # Check for built-in array methods
+  register_get 55
+  typeof
+  string_compare 'string'
+  jump_if crat_array_method
+
+  # Numeric index
+  register_get 16
+  push
+  register_get 55
+  array_get
+  register_to 16
+  jump crat_loop
+
+  label crat_array_method
+  register_get 55
+  string_compare 'length'
+  jump_if crat_arr_len
+  register_get 55
+  string_compare 'push'
+  jump_if crat_arr_push
+  register_get 55
+  string_compare 'indexOf'
+  jump_if crat_arr_indexof
+
+  value 0
+  register_to 16
+  return
+
+  label crat_arr_len
+  register_get 16
+  array_length
+  register_to 16
+  jump crat_loop
+
+  label crat_arr_push
+  invoke make_native_fn
+  jump crat_loop
+
+  label crat_arr_indexof
+  invoke make_native_fn
+  jump crat_loop
+
+  label crat_string
+  # String property access
+  register_get 55
+  string_compare 'length'
+  jump_if crat_str_len
+  register_get 55
+  string_compare 'endsWith'
+  jump_if crat_str_method
+  register_get 55
+  string_compare 'startsWith'
+  jump_if crat_str_method
+  register_get 55
+  string_compare 'indexOf'
+  jump_if crat_str_method
+  register_get 55
+  string_compare 'trim'
+  jump_if crat_str_method
+  register_get 55
+  string_compare 'split'
+  jump_if crat_str_method
+  register_get 55
+  string_compare 'slice'
+  jump_if crat_str_method
+  register_get 55
+  string_compare 'replace'
+  jump_if crat_str_method
+
+  value 0
+  register_to 16
+  return
+
+  label crat_str_len
+  register_get 16
+  string_length
+  register_to 16
+  jump crat_loop
+
+  label crat_str_method
+  invoke make_native_fn
+  jump crat_loop
+
+  label crat_null_err
+  string_new
+  string 'cannot read '
+  string_append_buf
+  register_get 55
+  register_to 23
+  typeof
+  string_compare 'string'
+  jump_if_not crat_ne_app
+  string 39
+  string_append_char
+  register_get 23
+  string_append_buf
+  string 39
+  string_append_char
+  label crat_ne_app
+  string ' of '
+  string_append_buf
+  register_get 16
+  typeof
+  string_append_buf
+  string_finish
+  register_to 41
+  value 1
+  register_to 40
+  return
+
+  label crat_done
+  return
+]
+
+# make_native_fn: create native function map for method binding
+# register 16 = the object, register 55 = method name
+define make_native_fn [
+  map_new
+  register_to 57
+
+  # Store method name
+  register_get 55
+  push
+  string '__fn_method'
+  push
+  register_get 57
+  map_set_dynamic
+
+  # Store bound object
+  register_get 16
+  push
+  string '__fn_this'
+  push
+  register_get 57
+  map_set_dynamic
+
+  # Mark as native
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 57
+  map_set_dynamic
+
+  register_get 57
+  register_to 16
+  return
+]
+
+# === Crown command: entries ===
+define cr_entries [
+  register_get 16
+  typeof
+  string_compare 'map'
+  jump_if_not crent_err
+
+  register_get 16
+  register_to 55
+
+  array_new
+  register_to 56
+
+  register_get 55
+  map_length_entries
+  register_to 57
+
+  value 0
+  register_to 58
+
+  label crent_loop
+  register_get 57
+  push
+  register_get 58
+  compare_eq
+  jump_if crent_done
+
+  # Get key
+  register_get 55
+  push
+  register_get 58
+  map_key_at
+  register_to 59
+
+  # Skip __parent__ and internal keys
+  register_get 59
+  string_starts_with '__'
+  jump_if crent_skip
+
+  # Get value
+  register_get 55
+  push
+  register_get 58
+  map_val_at
+  register_to 60
+
+  # Create [key, value] pair array
+  array_new
+  register_to 61
+  register_get 59
+  push
+  register_get 61
+  array_push
+  register_get 60
+  push
+  register_get 61
+  array_push
+
+  # Push pair to result
+  register_get 61
+  push
+  register_get 56
+  array_push
+
+  label crent_skip
+  register_get 58
+  add 1
+  register_to 58
+  jump crent_loop
+
+  label crent_done
+  register_get 56
+  register_to 16
+  return
+
+  label crent_err
+  string_new
+  string 'entries command requires current value to be an object, got '
+  string_append_buf
+  register_get 16
+  typeof
+  string_append_buf
+  string_finish
+  register_to 41
+  value 1
+  register_to 40
+  return
+]
+
+# === Crown command: clone ===
+define cr_clone [
+  # Check for optional name argument
+  tree_type
+  compare_eq 4
+  jump_if crclone_named
+  compare_eq 5
+  jump_if crclone_named
+
+  # Anonymous clone
+  map_new
+  register_to 55
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 55
+  map_set_dynamic
+  register_get 55
+  register_to 16
+  return
+
+  label crclone_named
+  tree_value
+  register_to 56
+  tree_advance
+
+  map_new
+  register_to 55
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 55
+  map_set_dynamic
+
+  # Store clone in parent scope under name
+  register_get 55
+  push
+  register_get 56
+  push
+  register_get 11
+  map_set_dynamic
+
+  register_get 55
+  register_to 16
+  return
+]
+
+# === Crown command: names ===
+define cr_names [
+  register_get 11
+  register_to 16
+  return
+]
+
+# === Crown command: unset ===
+define cr_unset [
+  tree_value
+  register_to 55
+  tree_advance
+  register_get 55
+  push
+  register_get 11
+  map_delete
+  return
+]
+
+# === Crown command: try ===
+define cr_try [
+  # try [block] [onError]
+  tree_type
+  compare_eq 1
+  jump_if_not crtry_done
+
+  register_get 40
+  register_to 55
+  register_get 41
+  register_to 56
+
+  value 0
+  register_to 40
+
+  # Walk try block in current scope
+  tree_advance
+  invoke crown_walk
+  tree_advance
+
+  # Check if error occurred
+  register_get 40
+  compare_eq 1
+  jump_if crtry_catch
+
+  # No error - restore previous error state
+  register_get 55
+  register_to 40
+  register_get 56
+  register_to 41
+  return
+
+  label crtry_catch
+  # Save block error
+  register_get 41
+  register_to 42
+  value 0
+  register_to 40
+
+  # Walk error handler if present
+  tree_type
+  compare_eq 1
+  jump_if_not crtry_done
+
+  tree_advance
+  invoke crown_walk
+  tree_advance
+
+  # Clear last block error
+  value 0
+  register_to 42
+
+  label crtry_done
+  return
+]
+
+# === Crown command: error ===
+define cr_error [
+  string_new
+  label crerr_loop
+  tree_type
+  compare_eq 3
+  jump_if crerr_done
+  compare_eq 0
+  jump_if crerr_done
+  compare_eq 2
+  jump_if crerr_done
+
+  invoke cr_eval_arg
+  register_to 55
+
+  register_get 55
+  typeof
+  string_compare 'string'
+  jump_if crerr_str
+  register_get 55
+  to_string
+  string_append_buf
+  jump crerr_space
+
+  label crerr_str
+  register_get 55
+  string_append_buf
+
+  label crerr_space
+  tree_type
+  compare_eq 3
+  jump_if crerr_done
+  value 32
+  string_append_char
+  jump crerr_loop
+
+  label crerr_done
+  string_finish
+  register_to 41
+  value 1
+  register_to 40
+  return
+]
+
+# === Crown command: get_error ===
+define cr_get_error [
+  register_get 42
+  typeof
+  string_compare 'undefined'
+  jump_if crge_cur
+
+  register_get 42
+  typeof
+  string_compare 'string'
+  jump_if_not crge_cur
+
+  register_get 42
+  register_to 16
+  value 0
+  register_to 40
+  register_to 42
+  return
+
+  label crge_cur
+  register_get 41
+  typeof
+  string_compare 'string'
+  jump_if_not crge_undef
+
+  register_get 41
+  register_to 16
+  value 0
+  register_to 40
+  return
+
+  label crge_undef
+  value 0
+  register_to 16
+  register_to 40
+  return
+]
+
+# === Crown command: current_error ===
+define cr_current_error [
+  register_get 42
+  typeof
+  string_compare 'string'
+  jump_if_not crce_cur
+
+  register_get 42
+  register_to 16
+  return
+
+  label crce_cur
+  register_get 41
+  typeof
+  string_compare 'string'
+  jump_if_not crce_undef
+  register_get 41
+  register_to 16
+  return
+
+  label crce_undef
+  value 0
+  register_to 16
+  return
+]
+
+# === Crown command: pick ===
+define cr_pick [
+  label crpick_loop
+  tree_type
+  compare_eq 1
+  jump_if_not crpick_done
+
+  # Save position of this block
+  tree_position
+  register_to 55
+
+  # Clone scope, evaluate condition (first stmt in block)
+  register_get 11
+  register_to 56
+
+  map_new
+  register_to 57
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 57
+  map_set_dynamic
+
+  register_get 57
+  register_to 11
+
+  tree_advance
+
+  # Walk first statement (condition)
+  tree_type
+  compare_eq 4
+  jump_if crpick_cond_cmd
+  compare_eq 5
+  jump_if crpick_cond_cmd
+
+  # Not a command - skip
+  register_get 56
+  register_to 11
+  register_get 55
+  tree_seek
+  tree_skip_block
+  jump crpick_loop
+
+  label crpick_cond_cmd
+  tree_value
+  register_to 20
+  tree_advance
+  invoke crown_dispatch
+  invoke cw_skip_to_end
+
+  # Restore scope
+  register_get 56
+  register_to 11
+
+  # Preserve current (condition result) before is_truthy overwrites it
+  register_get 16
+  register_to 60
+
+  # Check if condition was truthy
+  invoke is_truthy
+  jump_if crpick_match
+
+  # Not matched - skip rest of block and try next
+  register_get 55
+  tree_seek
+  tree_skip_block
+  jump crpick_loop
+
+  label crpick_match
+  # Restore current so body sees condition result (e.g. 1 from "true")
+  register_get 60
+  register_to 16
+
+  # Walk all remaining statements (cursor at first stmt or STMT_END after condition)
+  label crpick_loop_rest
+  tree_type
+  compare_eq 2
+  jump_if crpick_match_done
+  compare_eq 0
+  jump_if crpick_match_done
+  compare_eq 3
+  jump_if crpick_advance_stmt
+  invoke crown_walk
+  invoke cw_skip_to_end
+  jump crpick_loop_rest
+  label crpick_advance_stmt
+  tree_advance
+  invoke crown_walk
+  invoke cw_skip_to_end
+  jump crpick_loop_rest
+
+  label crpick_match_done
+  tree_advance
+
+  # Skip remaining blocks
+  label crpick_skip_remaining
+  tree_type
+  compare_eq 1
+  jump_if_not crpick_done
+  tree_skip_block
+  jump crpick_skip_remaining
+
+  label crpick_done
+  return
+]
+
+# === Crown command: loop ===
+define cr_loop [
+  # Save block position
+  tree_position
+  register_to 55
+
+  label crloop_iter
+  register_get 16
+  typeof
+  string_compare 'undefined'
+  jump_if crloop_done
+
+  register_get 40
+  compare_eq 1
+  jump_if crloop_done
+
+  # Seek to block start and walk
+  register_get 55
+  tree_seek
+
+  label crloop_blocks
+  tree_type
+  compare_eq 1
+  jump_if_not crloop_iter_done
+
+  tree_advance
+  invoke crown_walk
+  tree_advance
+  jump crloop_blocks
+
+  label crloop_iter_done
+  jump crloop_iter
+
+  label crloop_done
+  return
+]
+
+# === Crown command: drop ===
+define cr_drop [
+  label crdrop_loop
+  tree_type
+  compare_eq 3
+  jump_if crdrop_done
+  compare_eq 0
+  jump_if crdrop_done
+  compare_eq 2
+  jump_if crdrop_done
+
+  register_get 16
+  register_to 55
+  invoke cr_eval_arg
+  invoke is_truthy
+  jump_if crdrop_yes
+  register_get 55
+  register_to 16
+  jump crdrop_loop
+
+  label crdrop_yes
+  value 0
+  register_to 16
+
+  label crdrop_done
+  return
+]
+
+# === Crown command: keep ===
+define cr_keep [
+  value 0
+  register_to 55
+
+  label crkeep_loop
+  tree_type
+  compare_eq 3
+  jump_if crkeep_check
+  compare_eq 0
+  jump_if crkeep_check
+  compare_eq 2
+  jump_if crkeep_check
+
+  register_get 16
+  register_to 56
+  invoke cr_eval_arg
+  invoke is_truthy
+  jump_if crkeep_found
+
+  register_get 56
+  register_to 16
+  jump crkeep_loop
+
+  label crkeep_found
+  value 1
+  register_to 55
+  register_get 56
+  register_to 16
+  jump crkeep_loop
+
+  label crkeep_check
+  register_get 55
+  compare_eq 0
+  jump_if crkeep_drop
+  return
+
+  label crkeep_drop
+  value 0
+  register_to 16
+  return
+]
+
+# === Array iteration commands ===
+
+# map callback
+define cr_map [
+  register_get 16
+  register_to 80
+  invoke cr_eval_arg
+  register_to 81
+
+  array_new
+  register_to 82
+
+  register_get 80
+  array_length
+  register_to 83
+  value 0
+  register_to 84
+
+  label crmap_loop
+  register_get 83
+  push
+  register_get 84
+  compare_eq
+  jump_if crmap_done
+
+  # Get element
+  register_get 80
+  push
+  register_get 84
+  array_get
+  register_to 16
+
+  # Call callback
+  register_get 81
+  register_to 60
+  invoke cr_call_internal
+
+  # Push result
+  register_get 16
+  push
+  register_get 82
+  array_push
+
+  register_get 84
+  add 1
+  register_to 84
+  jump crmap_loop
+
+  label crmap_done
+  register_get 82
+  register_to 16
+  return
+]
+
+# filter callback
+define cr_filter [
+  register_get 16
+  register_to 80
+  invoke cr_eval_arg
+  register_to 81
+
+  array_new
+  register_to 82
+
+  register_get 80
+  array_length
+  register_to 83
+  value 0
+  register_to 84
+
+  label crfilt_loop
+  register_get 83
+  push
+  register_get 84
+  compare_eq
+  jump_if crfilt_done
+
+  register_get 80
+  push
+  register_get 84
+  array_get
+  register_to 85
+
+  # Call callback with element
+  register_get 85
+  register_to 16
+  register_get 81
+  register_to 60
+  invoke cr_call_internal
+
+  # If truthy, keep
+  invoke is_truthy
+  jump_if_not crfilt_next
+
+  register_get 85
+  push
+  register_get 82
+  array_push
+
+  label crfilt_next
+  register_get 84
+  add 1
+  register_to 84
+  jump crfilt_loop
+
+  label crfilt_done
+  register_get 82
+  register_to 16
+  return
+]
+
+# each callback
+define cr_each [
+  register_get 16
+  register_to 80
+  invoke cr_eval_arg
+  register_to 81
+
+  array_new
+  register_to 82
+
+  register_get 80
+  array_length
+  register_to 83
+  value 0
+  register_to 84
+
+  label creach_loop
+  register_get 83
+  push
+  register_get 84
+  compare_eq
+  jump_if creach_done
+
+  register_get 80
+  push
+  register_get 84
+  array_get
+  register_to 16
+
+  register_get 81
+  register_to 60
+  # For each, callback gets (element, index)
+  invoke cr_call_internal
+
+  register_get 16
+  push
+  register_get 82
+  array_push
+
+  register_get 84
+  add 1
+  register_to 84
+  jump creach_loop
+
+  label creach_done
+  register_get 82
+  register_to 16
+  return
+]
+
+# find callback
+define cr_find [
+  register_get 16
+  register_to 80
+  invoke cr_eval_arg
+  register_to 81
+
+  register_get 80
+  array_length
+  register_to 83
+  value 0
+  register_to 84
+
+  label crfind_loop
+  register_get 83
+  push
+  register_get 84
+  compare_eq
+  jump_if crfind_notfound
+
+  register_get 80
+  push
+  register_get 84
+  array_get
+  register_to 85
+
+  register_get 85
+  register_to 16
+  register_get 81
+  register_to 60
+  invoke cr_call_internal
+
+  invoke is_truthy
+  jump_if crfind_found
+
+  register_get 84
+  add 1
+  register_to 84
+  jump crfind_loop
+
+  label crfind_found
+  register_get 85
+  register_to 16
+  return
+
+  label crfind_notfound
+  value 0
+  register_to 16
+  return
+]
+
+# group [expression]
+define cr_group [
+  register_get 16
+  register_to 80
+
+  # Evaluate group-by expression to get function
+  invoke cr_eval_arg
+  register_to 81
+
+  map_new
+  register_to 82
+
+  register_get 80
+  array_length
+  register_to 83
+  value 0
+  register_to 84
+
+  label crgrp_loop
+  register_get 83
+  push
+  register_get 84
+  compare_eq
+  jump_if crgrp_done
+
+  register_get 80
+  push
+  register_get 84
+  array_get
+  register_to 85
+
+  register_get 85
+  register_to 16
+  register_get 81
+  register_to 60
+  invoke cr_call_internal
+
+  # Result is the group key
+  register_to 86
+
+  register_get 86
+  typeof
+  string_compare 'string'
+  jump_if_not crgrp_next
+
+  # Check if group exists
+  register_get 86
+  push
+  register_get 82
+  map_has_dynamic
+  jump_if crgrp_existing
+
+  # Create new group array
+  array_new
+  register_to 87
+  register_get 85
+  push
+  register_get 87
+  array_push
+  register_get 87
+  push
+  register_get 86
+  push
+  register_get 82
+  map_set_dynamic
+  jump crgrp_next
+
+  label crgrp_existing
+  register_get 86
+  push
+  register_get 82
+  map_get_dynamic
+  register_to 87
+  register_get 85
+  push
+  register_get 87
+  array_push
+
+  label crgrp_next
+  register_get 84
+  add 1
+  register_to 84
+  jump crgrp_loop
+
+  label crgrp_done
+  register_get 82
+  register_to 16
+  return
+]
+
+# cr_call_internal: call function in register 60 with currentValue as first arg
+define cr_call_internal [
+  register_get 60
+  typeof
+  string_compare 'map'
+  jump_if_not crci_err
+
+  register_get 60
+  map_has '__fn_native'
+  jump_if crci_native
+
+  register_get 60
+  map_get '__fn_body'
+  register_to 61
+
+  register_get 60
+  map_get '__fn_scope'
+  register_to 62
+
+  register_get 60
+  map_get '__fn_params'
+  register_to 63
+
+  register_get 60
+  map_get '__fn_bpath'
+  register_to 64
+
+  # Clone scope
+  map_new
+  register_to 65
+  register_get 62
+  push
+  string '__parent__'
+  push
+  register_get 65
+  map_set_dynamic
+
+  # Bind first param = currentValue (reg 16)
+  register_get 63
+  push
+  value 0
+  array_get
+  register_to 67
+  register_get 67
+  typeof
+  string_compare 'undefined'
+  jump_if crci_exec
+
+  register_get 16
+  push
+  register_get 67
+  push
+  register_get 65
+  map_set_dynamic
+
+  label crci_exec
+  register_get 11
+  register_to 55
+  register_get 12
+  register_to 56
+  register_get 40
+  register_to 57
+
+  register_get 65
+  register_to 11
+  register_get 64
+  typeof
+  string_compare 'string'
+  jump_if_not crci_walk
+  register_get 64
+  register_to 12
+
+  label crci_walk
+  value 0
+  register_to 40
+
+  tree_save
+  register_get 61
+  tree_seek
+  tree_advance
+
+  invoke crown_walk
+
+  tree_restore
+
+  register_get 40
+  compare_eq 1
+  jump_if crci_error
+
+  register_get 55
+  register_to 11
+  register_get 56
+  register_to 12
+  return
+
+  label crci_error
+  register_get 55
+  register_to 11
+  register_get 56
+  register_to 12
+  value 0
+  register_to 16
+  return
+
+  label crci_native
+  # Native method call with one arg
+  array_new
+  register_to 71
+  register_get 16
+  push
+  register_get 71
+  array_push
+  register_get 60
+  map_get '__fn_native'
+  register_to 70
+  invoke native_dispatch
+  return
+
+  label crci_err
+  return
+]
+
+# === Crown command: load ===
+define cr_load [
+  invoke cr_eval_arg
+  register_to 55
+
+  # Resolve path
+  register_get 55
+  push
+  value 0
+  string_char_at
+  compare_eq 47
+  jump_if crload_abs
+
+  # Relative path - join with basePath
+  string_new
+  register_get 12
+  string_append_buf
+  value 47
+  string_append_char
+  register_get 55
+  string_append_buf
+  string_finish
+  register_to 55
+
+  label crload_abs
+  # Compute dirname for nextBasePath
+  register_get 55
+  register_to 50
+  invoke compute_dirname
+  register_get 12
+  register_to 13
+
+  # Read file
+  register_get 55
+  file_read
+  register_to 56
+
+  register_get 56
+  typeof
+  string_compare 'undefined'
+  jump_if crload_err
+
+  # If path ends with .ca, leave current = content for run_ca_string
+  register_get 55
+  string_length
+  register_to 51
+  value 3
+  register_to 52
+  register_get 51
+  push
+  register_get 52
+  compare_lt
+  jump_if crload_not_ca
+  register_get 55
+  push
+  register_get 51
+  subtract 1
+  register_to 16
+  string_char_at
+  value 97
+  compare_eq
+  jump_if_not crload_not_ca
+  register_get 55
+  push
+  register_get 51
+  subtract 2
+  register_to 16
+  string_char_at
+  value 99
+  compare_eq
+  jump_if_not crload_not_ca
+  register_get 55
+  push
+  register_get 51
+  subtract 3
+  register_to 16
+  string_char_at
+  value 46
+  compare_eq
+  jump_if_not crload_not_ca
+  register_get 56
+  register_to 16
+  return
+
+  label crload_not_ca
+  # Create a function that parses and walks the file
+  # We store the file content and path in a function map
+  map_new
+  register_to 57
+
+  # Parse the file content into a tree and save position
+  register_get 56
+  tree_parse
+  tree_position
+  register_to 58
+
+  register_get 58
+  push
+  string '__fn_body'
+  push
+  register_get 57
+  map_set_dynamic
+
+  register_get 11
+  push
+  string '__fn_scope'
+  push
+  register_get 57
+  map_set_dynamic
+
+  array_new
+  push
+  string '__fn_params'
+  push
+  register_get 57
+  map_set_dynamic
+
+  register_get 13
+  push
+  string '__fn_bpath'
+  push
+  register_get 57
+  map_set_dynamic
+
+  register_get 57
+  register_to 16
+  return
+
+  label crload_err
+  string_new
+  string 'ENOENT: no such file or directory, open '
+  string_append_buf
+  string 39
+  string_append_char
+  register_get 55
+  string_append_buf
+  string 39
+  string_append_char
+  string_finish
+  register_to 41
+  value 1
+  register_to 40
+  return
+]
+
+# === Crown command: point ===
+define cr_point [
+  register_get 16
+  register_to 60
+
+  register_get 60
+  typeof
+  string_compare 'map'
+  jump_if_not crpoint_err
+
+  register_get 60
+  map_get '__fn_body'
+  register_to 61
+  register_get 60
+  map_get '__fn_scope'
+  register_to 62
+  register_get 60
+  map_get '__fn_bpath'
+  register_to 64
+
+  # Create new scope
+  map_new
+  register_to 65
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 65
+  map_set_dynamic
+
+  # Save state
+  register_get 11
+  register_to 55
+  register_get 12
+  register_to 56
+  register_get 40
+  register_to 57
+
+  register_get 65
+  register_to 11
+  register_get 64
+  typeof
+  string_compare 'string'
+  jump_if_not crpoint_walk
+  register_get 64
+  register_to 12
+
+  label crpoint_walk
+  value 0
+  register_to 40
+
+  tree_save
+  register_get 61
+  tree_seek
+
+  invoke crown_walk
+
+  tree_restore
+
+  register_get 55
+  register_to 11
+  register_get 56
+  register_to 12
+
+  register_get 40
+  compare_eq 1
+  jump_if crpoint_error
+
+  return
+
+  label crpoint_error
+  return
+
+  label crpoint_err
+  string 'current value must be function'
+  register_to 41
+  value 1
+  register_to 40
+  return
+]
+
+# === Crown command: will ===
+define cr_will [
+  register_get 16
+  register_to 60
+
+  # Collect arguments
+  array_new
+  register_to 61
+
+  label crwill_args
+  tree_type
+  compare_eq 3
+  jump_if crwill_done
+  compare_eq 0
+  jump_if crwill_done
+  compare_eq 2
+  jump_if crwill_done
+  invoke cr_eval_arg
+  push
+  register_get 61
+  array_push
+  jump crwill_args
+
+  label crwill_done
+  # Create partial application function
+  map_new
+  register_to 62
+
+  register_get 60
+  push
+  string '__fn_wrapped'
+  push
+  register_get 62
+  map_set_dynamic
+
+  register_get 61
+  push
+  string '__fn_bound_args'
+  push
+  register_get 62
+  map_set_dynamic
+
+  value 2
+  push
+  string '__fn_native'
+  push
+  register_get 62
+  map_set_dynamic
+
+  register_get 62
+  register_to 16
+  return
+]
+
+# === Crown command: tap ===
+define cr_tap [
+  # Call currentValue as function, passing current scope
+  register_get 16
+  register_to 60
+
+  register_get 60
+  typeof
+  string_compare 'map'
+  jump_if_not crtap_err
+
+  # Just invoke the function
+  invoke cr_call_internal
+  return
+
+  label crtap_err
+  string 'current value must be function'
+  register_to 41
+  value 1
+  register_to 40
+  return
+]
+
+# === Crown command: tell ===
+define cr_tell [
+  register_get 16
+  register_to 55
+
+  register_get 16
+  register_to 60
+
+  # Collect and call but discard return
+  invoke cr_call
+
+  # Restore original currentValue
+  register_get 55
+  register_to 16
+  return
+]
+
+# === Crown command: new ===
+define cr_new [
+  register_get 16
+  typeof
+  string_compare 'map'
+  jump_if_not crnew_err
+
+  register_get 16
+  map_has '__fn_native'
+  jump_if crnew_native
+
+  label crnew_err
+  string 'currentValue is not a constructor'
+  register_to 41
+  value 1
+  register_to 40
+  return
+
+  label crnew_native
+  # Handle native constructors (Date etc.)
+  register_get 16
+  map_get '__fn_native'
+  register_to 70
+  array_new
+  register_to 71
+
+  label crnew_args
+  tree_type
+  compare_eq 3
+  jump_if crnew_exec
+  compare_eq 0
+  jump_if crnew_exec
+  compare_eq 2
+  jump_if crnew_exec
+  invoke cr_eval_arg
+  push
+  register_get 71
+  array_push
+  jump crnew_args
+
+  label crnew_exec
+  invoke native_dispatch
+  return
+]
+
+# === Crown command: push (push to array) ===
+define cr_push_cmd [
+  register_get 16
+  register_to 55
+  invoke cr_eval_arg
+  push
+  register_get 55
+  array_push
+  register_get 55
+  register_to 16
+  return
+]
+
+# === Crown command: prepend ===
+define cr_prepend [
+  # TODO: implement properly
+  return
+]
+
+# === Crown command: run (REPL execution) ===
+define cr_run [
+  invoke cr_eval_arg
+  register_to 55
+
+  register_get 55
+  typeof
+  string_compare 'string'
+  jump_if_not crrun_done
+
+  # Parse and walk the source
+  register_get 55
+  tree_parse
+  tree_save
+  invoke crown_walk
+  tree_restore
+
+  label crrun_done
+  return
+]
+
+# === Crown command: walk ===
+define cr_walk_cmd [
+  # Walk instructions in current scope
+  invoke cr_eval_arg
+  return
+]
+
+# === Crown command: log ===
+define cr_log [
+  tree_type
+  compare_eq 3
+  jump_if crl_cur
+  compare_eq 0
+  jump_if crl_cur
+  compare_eq 2
+  jump_if crl_cur
+
+  # Has arguments - print them
+  label crl_args
+  tree_type
+  compare_eq 3
+  jump_if crl_nl
+  compare_eq 0
+  jump_if crl_nl
+  compare_eq 2
+  jump_if crl_nl
+  compare_eq 1
+  jump_if crl_block_arg
+
+  invoke cr_eval_arg
+  invoke log_value
+  tree_type
+  compare_eq 3
+  jump_if crl_nl
+  value 32
+  print_char
+  jump crl_args
+
+  label crl_block_arg
+  invoke cr_eval_arg
+  invoke log_value
+  tree_type
+  compare_eq 3
+  jump_if crl_nl
+  value 32
+  print_char
+  jump crl_args
+
+  label crl_nl
+  print_newline
+  return
+
+  label crl_cur
+  register_get 16
+  invoke log_value_dir
+  print_newline
+  return
+]
+
+# log_value: print register 16 as console.log would
+define log_value [
+  register_get 16
+  typeof
+  string_compare 'string'
+  jump_if lv_str
+  register_get 16
+  typeof
+  string_compare 'number'
+  jump_if lv_num
+  register_get 16
+  typeof
+  string_compare 'boolean'
+  jump_if lv_bool
+  register_get 16
+  typeof
+  string_compare 'undefined'
+  jump_if lv_undef
+  register_get 16
+  typeof
+  string_compare 'null'
+  jump_if lv_null
+  register_get 16
+  typeof
+  string_compare 'array'
+  jump_if lv_arr
+  register_get 16
+  typeof
+  string_compare 'map'
+  jump_if lv_map
+  return
+
+  label lv_str
+  register_get 16
+  print
+  return
+
+  label lv_num
+  register_get 16
+  print
+  return
+
+  label lv_bool
+  register_get 16
+  compare_eq 0
+  jump_if lv_bfalse
+  string 'true'
+  print
+  return
+  label lv_bfalse
+  string 'false'
+  print
+  return
+
+  label lv_undef
+  string 'undefined'
+  print
+  return
+
+  label lv_null
+  string 'null'
+  print
+  return
+
+  label lv_arr
+  # TODO: implement array printing
+  register_get 16
+  print
+  return
+
+  label lv_map
+  register_get 16
+  map_has '__fn_body'
+  jump_if lv_fn
+  register_get 16
+  map_has '__fn_native'
+  jump_if lv_fn
+  string '[Object]'
+  print
+  return
+  label lv_fn
+  string '[Function]'
+  print
+  return
+]
+
+# log_value_dir: print register 16 as console.dir would
+define log_value_dir [
+  register_get 16
+  typeof
+  string_compare 'string'
+  jump_if lvd_str
+  register_get 16
+  typeof
+  string_compare 'number'
+  jump_if lvd_num
+  register_get 16
+  typeof
+  string_compare 'boolean'
+  jump_if lvd_bool
+  register_get 16
+  typeof
+  string_compare 'undefined'
+  jump_if lvd_undef
+  register_get 16
+  typeof
+  string_compare 'null'
+  jump_if lvd_null
+  register_get 16
+  typeof
+  string_compare 'array'
+  jump_if lvd_arr
+  register_get 16
+  typeof
+  string_compare 'map'
+  jump_if lvd_map
+  return
+
+  label lvd_str
+  value 39
+  print_char
+  register_get 16
+  print
+  value 39
+  print_char
+  return
+
+  label lvd_num
+  register_get 16
+  print
+  return
+
+  label lvd_bool
+  register_get 16
+  compare_eq 0
+  jump_if lvd_bfalse
+  string 'true'
+  print
+  return
+  label lvd_bfalse
+  string 'false'
+  print
+  return
+
+  label lvd_undef
+  string 'undefined'
+  print
+  return
+
+  label lvd_null
+  string 'null'
+  print
+  return
+
+  label lvd_arr
+  register_get 16
+  print
+  return
+
+  label lvd_map
+  register_get 16
+  map_has '__fn_body'
+  jump_if lvd_fn
+  register_get 16
+  map_has '__fn_native'
+  jump_if lvd_fn
+  string '[Object]'
+  print
+  return
+  label lvd_fn
+  string '[AsyncFunction: currentValue]'
+  print
+  return
+]
+
+# === Crown command: template ===
 define cr_template [
-  # Read format string
   tree_value
   register_to 18
   tree_advance
 
-  # Evaluate block arguments into temporary registers (25-29)
   value 0
   register_to 24
+  register_get 16
+  register_to 29
 
   label crt_args
   tree_type
   compare_eq 1
   jump_if_not crt_build
 
-  # Evaluate block argument
   tree_advance
+  register_get 11
+  register_to 55
+  map_new
+  register_to 56
+  register_get 11
+  push
+  string '__parent__'
+  push
+  register_get 56
+  map_set_dynamic
+  register_get 56
+  register_to 11
+  register_get 29
+  register_to 16
   invoke crown_walk
   tree_advance
+  register_get 55
+  register_to 11
 
-  # Save result based on arg index
   register_get 24
   compare_eq 0
-  jump_if crt_save0
+  jump_if crt_s0
   compare_eq 1
-  jump_if crt_save1
+  jump_if crt_s1
   compare_eq 2
-  jump_if crt_save2
+  jump_if crt_s2
+  compare_eq 3
+  jump_if crt_s3
   jump crt_args
 
-  label crt_save0
+  label crt_s0
   register_get 16
   register_to 25
-  register_get 24, add 1, register_to 24
+  register_get 24
+  add 1
+  register_to 24
   jump crt_args
-
-  label crt_save1
+  label crt_s1
   register_get 16
   register_to 26
-  register_get 24, add 1, register_to 24
+  register_get 24
+  add 1
+  register_to 24
   jump crt_args
-
-  label crt_save2
+  label crt_s2
   register_get 16
   register_to 27
-  register_get 24, add 1, register_to 24
+  register_get 24
+  add 1
+  register_to 24
+  jump crt_args
+  label crt_s3
+  register_get 16
+  register_to 28
+  register_get 24
+  add 1
+  register_to 24
   jump crt_args
 
   label crt_build
-  # Build result string from format
   string_new
-
-  # Get format string length
   register_get 18
   push
   string_length
@@ -527,69 +4543,69 @@ define cr_template [
   compare_eq
   jump_if crt_done
 
-  # Get char at current index
   register_get 18
   push
   register_get 22
   string_char_at
-
   compare_eq 37
   jump_if crt_subst
 
-  # Regular char
   string_append_char
-  register_get 22, add 1, register_to 22
+  register_get 22
+  add 1
+  register_to 22
   jump crt_loop
 
   label crt_subst
-  # Skip % and read digit
-  register_get 22, add 1, register_to 22
+  register_get 22
+  add 1
+  register_to 22
   register_get 18
   push
   register_get 22
   string_char_at
   subtract 48
 
-  # Get the template arg by index
   compare_eq 0
-  jump_if crt_get0
+  jump_if crt_g0
   compare_eq 1
-  jump_if crt_get1
+  jump_if crt_g1
   compare_eq 2
-  jump_if crt_get2
-  jump crt_skip_subst
+  jump_if crt_g2
+  compare_eq 3
+  jump_if crt_g3
+  jump crt_skip_s
 
-  label crt_get0
+  label crt_g0
   register_get 25
-  jump crt_append_arg
-
-  label crt_get1
+  jump crt_app
+  label crt_g1
   register_get 26
-  jump crt_append_arg
-
-  label crt_get2
+  jump crt_app
+  label crt_g2
   register_get 27
-  jump crt_append_arg
+  jump crt_app
+  label crt_g3
+  register_get 28
+  jump crt_app
 
-  label crt_append_arg
-  # Save value before typeof (typeof overwrites current value)
+  label crt_app
   register_to 23
   typeof
   string_compare 'string'
-  jump_if crt_is_str
-
-  # Number: convert to string
+  jump_if crt_app_str
   register_get 23
   to_string
   string_append_buf
-  jump crt_skip_subst
-
-  label crt_is_str
+  jump crt_skip_s
+  label crt_app_str
   register_get 23
   string_append_buf
 
-  label crt_skip_subst
-  register_get 22, add 1, register_to 22
+  label crt_skip_s
+  register_get 22
+  add 1
+  register_to 22
   jump crt_loop
 
   label crt_done
@@ -598,5 +4614,1121 @@ define cr_template [
   return
 ]
 
-# Run all files
+# === Crown command: global ===
+define cr_global [
+  # Access global/native objects
+  tree_type
+  compare_eq 3
+  jump_if crglob_this
+  compare_eq 0
+  jump_if crglob_this
+
+  tree_value
+  register_to 55
+  tree_advance
+
+  # Check known globals
+  register_get 55
+  string_compare 'import'
+  jump_if crglob_import
+
+  register_get 55
+  string_compare 'process'
+  jump_if crglob_process
+
+  register_get 55
+  string_compare 'Array'
+  jump_if crglob_Array
+
+  register_get 55
+  string_compare 'Math'
+  jump_if crglob_Math
+
+  register_get 55
+  string_compare 'Date'
+  jump_if crglob_Date
+
+  register_get 55
+  string_compare 'console'
+  jump_if crglob_console
+
+  register_get 55
+  string_compare 'fs'
+  jump_if crglob_fs
+
+  register_get 55
+  string_compare 'path'
+  jump_if crglob_path
+
+  value 0
+  register_to 16
+  return
+
+  label crglob_this
+  register_get 10
+  register_to 16
+  return
+
+  label crglob_import
+  # Create native import function
+  map_new
+  register_to 57
+  value 10
+  push
+  string '__fn_native'
+  push
+  register_get 57
+  map_set_dynamic
+  register_get 57
+  register_to 16
+
+  # Check for further segments
+  label crglob_seg
+  tree_type
+  compare_eq 3
+  jump_if crglob_done
+  compare_eq 0
+  jump_if crglob_done
+  compare_eq 2
+  jump_if crglob_done
+  invoke cr_eval_arg
+  register_to 55
+  register_get 55
+  push
+  register_get 16
+  map_get_dynamic
+  register_to 16
+  jump crglob_seg
+
+  label crglob_done
+  return
+
+  label crglob_process
+  invoke make_process_obj
+  register_to 16
+  jump crglob_seg
+
+  label crglob_Array
+  invoke make_array_obj
+  register_to 16
+  jump crglob_seg
+
+  label crglob_Math
+  invoke make_math_obj
+  register_to 16
+  jump crglob_seg
+
+  label crglob_Date
+  invoke make_date_obj
+  register_to 16
+  jump crglob_seg
+
+  label crglob_console
+  invoke make_console_obj
+  register_to 16
+  jump crglob_seg
+
+  label crglob_fs
+  invoke make_fs_obj
+  register_to 16
+  jump crglob_seg
+
+  label crglob_path
+  invoke make_path_obj
+  register_to 16
+  jump crglob_seg
+]
+
+# === Native function dispatch ===
+# Input: register 60 = function map, register 71 = args array, register 70 = native id
+define native_dispatch [
+  register_get 60
+  map_has '__fn_method'
+  jump_if nd_method
+
+  register_get 70
+  compare_eq 10
+  jump_if nd_import
+
+  register_get 70
+  compare_eq 2
+  jump_if nd_will_thunk
+
+  register_get 70
+  compare_eq 3
+  jump_if nd_Date
+
+  # Generic native with ID
+  value 0
+  register_to 16
+  return
+
+  label nd_Date
+  # new Date() -> return epoch seconds (cached at run start)
+  register_get 81
+  register_to 16
+  return
+
+  label nd_method
+  # Method call: __fn_this = object, __fn_method = method name
+  register_get 60
+  map_get '__fn_this'
+  register_to 72
+  register_get 60
+  map_get '__fn_method'
+  register_to 73
+
+  # Dispatch based on object type and method
+  register_get 72
+  typeof
+  string_compare 'array'
+  jump_if nd_arr_method
+
+  register_get 72
+  typeof
+  string_compare 'string'
+  jump_if nd_str_method
+
+  register_get 72
+  typeof
+  string_compare 'map'
+  jump_if nd_map_method
+
+  register_get 72
+  typeof
+  string_compare 'number'
+  jump_if nd_number_method
+
+  value 0
+  register_to 16
+  return
+
+  label nd_number_method
+  # Date instance is epoch (number); toLocaleString and getMinutes
+  register_get 73
+  string_compare 'toLocaleString'
+  jump_if nd_date_tolocale
+  register_get 73
+  string_compare 'getMinutes'
+  jump_if nd_date_getminutes
+  value 0
+  register_to 16
+  return
+
+  label nd_date_tolocale
+  invoke get_date_string
+  return
+
+  label nd_date_getminutes
+  invoke get_minutes_from_epoch
+  return
+
+  label nd_arr_method
+  register_get 73
+  string_compare 'push'
+  jump_if nd_arr_push
+  register_get 73
+  string_compare 'indexOf'
+  jump_if nd_arr_indexof
+
+  value 0
+  register_to 16
+  return
+
+  label nd_arr_push
+  register_get 71
+  push
+  value 0
+  array_get
+  push
+  register_get 72
+  array_push
+  register_get 72
+  register_to 16
+  return
+
+  label nd_arr_indexof
+  register_get 71
+  push
+  value 0
+  array_get
+  register_to 74
+
+  register_get 72
+  array_length
+  register_to 75
+  value 0
+  register_to 76
+
+  label nd_ai_loop
+  register_get 75
+  push
+  register_get 76
+  compare_eq
+  jump_if nd_ai_nf
+
+  register_get 72
+  push
+  register_get 76
+  array_get
+  register_to 77
+
+  # Compare
+  register_get 77
+  typeof
+  register_to 78
+  register_get 74
+  typeof
+  register_to 79
+
+  register_get 78
+  push
+  register_get 79
+  string_compare
+  jump_if_not nd_ai_next
+
+  register_get 78
+  string_compare 'string'
+  jump_if nd_ai_strcmp
+
+  register_get 74
+  push
+  register_get 77
+  compare_eq
+  jump_if nd_ai_found
+  jump nd_ai_next
+
+  label nd_ai_strcmp
+  register_get 77
+  push
+  register_get 74
+  string_compare
+  jump_if nd_ai_found
+
+  label nd_ai_next
+  register_get 76
+  add 1
+  register_to 76
+  jump nd_ai_loop
+
+  label nd_ai_found
+  register_get 76
+  register_to 16
+  return
+
+  label nd_ai_nf
+  value -1
+  register_to 16
+  return
+
+  label nd_str_method
+  register_get 73
+  string_compare 'endsWith'
+  jump_if nd_str_endswith
+  register_get 73
+  string_compare 'startsWith'
+  jump_if nd_str_startswith
+  register_get 73
+  string_compare 'indexOf'
+  jump_if nd_str_indexof
+  register_get 73
+  string_compare 'trim'
+  jump_if nd_str_trim
+  register_get 73
+  string_compare 'split'
+  jump_if nd_str_split
+  register_get 73
+  string_compare 'slice'
+  jump_if nd_str_slice
+  register_get 73
+  string_compare 'replace'
+  jump_if nd_str_replace
+
+  value 0
+  register_to 16
+  return
+
+  label nd_str_endswith
+  register_get 72
+  push
+  register_get 71
+  push
+  value 0
+  array_get
+  string_ends_with
+  jump_if nd_se_yes
+  value 0
+  register_to 16
+  return
+  label nd_se_yes
+  value 1
+  register_to 16
+  return
+
+  label nd_str_startswith
+  register_get 71
+  push
+  value 0
+  array_get
+  register_to 74
+  register_get 72
+  register_get 74
+  string_starts_with
+  jump_if nd_ss_yes
+  value 0
+  register_to 16
+  return
+  label nd_ss_yes
+  value 1
+  register_to 16
+  return
+
+  label nd_str_indexof
+  register_get 72
+  push
+  register_get 71
+  push
+  value 0
+  array_get
+  string_index_of
+  register_to 16
+  return
+
+  label nd_str_trim
+  # Simple trim: just return the string for now
+  register_get 72
+  register_to 16
+  return
+
+  label nd_str_split
+  # TODO: implement string split
+  array_new
+  register_to 16
+  register_get 72
+  push
+  register_get 16
+  array_push
+  return
+
+  label nd_str_slice
+  # TODO: implement string slice
+  register_get 72
+  register_to 16
+  return
+
+  label nd_str_replace
+  # TODO: implement string replace
+  register_get 72
+  register_to 16
+  return
+
+  label nd_map_method
+  # Map/object method calls (e.g., fs.readFile, path.join)
+  register_get 72
+  map_has '__module__'
+  jump_if nd_module_method
+
+  # Regular object method
+  register_get 73
+  push
+  register_get 72
+  map_get_dynamic
+  register_to 16
+  return
+
+  label nd_module_method
+  register_get 72
+  map_get '__module__'
+  register_to 74
+
+  register_get 74
+  string_compare 'fs'
+  jump_if nd_fs_method
+  register_get 74
+  string_compare 'path'
+  jump_if nd_path_method
+  register_get 74
+  string_compare 'process'
+  jump_if nd_process_method
+  register_get 74
+  string_compare 'Array'
+  jump_if nd_Array_method
+
+  value 0
+  register_to 16
+  return
+
+  label nd_fs_method
+  register_get 73
+  string_compare 'readFile'
+  jump_if nd_fs_readFile
+  register_get 73
+  string_compare 'readdir'
+  jump_if nd_fs_readdir
+  value 0
+  register_to 16
+  return
+
+  label nd_fs_readFile
+  register_get 71
+  push
+  value 0
+  array_get
+  file_read
+  register_to 16
+  return
+
+  label nd_fs_readdir
+  # Read directory using getdents64
+  register_get 71
+  push
+  value 0
+  array_get
+  register_to 74
+
+  # Open directory
+  register_get 74
+  # sys_open with O_RDONLY | O_DIRECTORY
+  push
+  value 0
+  register_to 16
+  register_get 74
+  sys_exit
+  # Actually need to use sys_open, let me fix this
+  # We need a way to open a directory...
+  # For now, use simple approach
+  register_get 74
+  file_read
+  # file_read fails on dirs, use getdents
+  # Actually this is complex, let me build a proper readdir
+  # For now, return empty array
+  array_new
+  register_to 16
+  return
+
+  label nd_path_method
+  register_get 73
+  string_compare 'join'
+  jump_if nd_path_join
+  register_get 73
+  string_compare 'dirname'
+  jump_if nd_path_dirname
+
+  value 0
+  register_to 16
+  return
+
+  label nd_path_join
+  # Join path segments
+  string_new
+  register_get 71
+  array_length
+  register_to 74
+  value 0
+  register_to 75
+
+  label nd_pj_loop
+  register_get 74
+  push
+  register_get 75
+  compare_eq
+  jump_if nd_pj_done
+
+  register_get 75
+  compare_gt 0
+  jump_if nd_pj_sep
+
+  label nd_pj_add
+  register_get 71
+  push
+  register_get 75
+  array_get
+  string_append_buf
+
+  register_get 75
+  add 1
+  register_to 75
+  jump nd_pj_loop
+
+  label nd_pj_sep
+  value 47
+  string_append_char
+  jump nd_pj_add
+
+  label nd_pj_done
+  string_finish
+  register_to 16
+  return
+
+  label nd_path_dirname
+  register_get 71
+  push
+  value 0
+  array_get
+  register_to 50
+  invoke compute_dirname
+  register_get 12
+  register_to 16
+  return
+
+  label nd_process_method
+  register_get 73
+  string_compare 'exit'
+  jump_if nd_proc_exit
+  register_get 73
+  string_compare 'cwd'
+  jump_if nd_proc_cwd
+
+  value 0
+  register_to 16
+  return
+
+  label nd_proc_exit
+  register_get 71
+  push
+  value 0
+  array_get
+  sys_exit
+
+  label nd_proc_cwd
+  sys_getcwd
+  register_to 16
+  return
+
+  label nd_Array_method
+  register_get 73
+  string_compare 'isArray'
+  jump_if nd_isArray
+  value 0
+  register_to 16
+  return
+
+  label nd_isArray
+  register_get 71
+  push
+  value 0
+  array_get
+  typeof
+  string_compare 'array'
+  jump_if nd_ia_yes
+  value 0
+  register_to 16
+  return
+  label nd_ia_yes
+  value 1
+  register_to 16
+  return
+
+  label nd_import
+  # import(module_name) - return module object
+  register_get 71
+  push
+  value 0
+  array_get
+  register_to 74
+
+  register_get 74
+  string_compare 'fs/promises'
+  jump_if nd_imp_fs
+  register_get 74
+  string_compare 'path'
+  jump_if nd_imp_path
+  register_get 74
+  string_compare 'node:child_process'
+  jump_if nd_imp_stub
+
+  value 0
+  register_to 16
+  return
+
+  label nd_imp_fs
+  invoke make_fs_obj
+  register_to 16
+  return
+
+  label nd_imp_path
+  invoke make_path_obj
+  register_to 16
+  return
+
+  label nd_imp_stub
+  map_new
+  register_to 16
+  return
+
+  label nd_will_thunk
+  # Invoke the wrapped function with bound args
+  register_get 60
+  map_get '__fn_wrapped'
+  register_to 61
+
+  register_get 60
+  map_get '__fn_bound_args'
+  register_to 62
+
+  register_get 61
+  register_to 60
+
+  # Set up for call with bound args
+  register_get 62
+  array_length
+  register_to 63
+  value 0
+  register_to 64
+
+  # Get fn details
+  register_get 61
+  map_get '__fn_body'
+  register_to 65
+  register_get 61
+  map_get '__fn_scope'
+  register_to 66
+  register_get 61
+  map_get '__fn_params'
+  register_to 67
+  register_get 61
+  map_get '__fn_bpath'
+  register_to 68
+
+  # Clone scope
+  map_new
+  register_to 69
+  register_get 66
+  push
+  string '__parent__'
+  push
+  register_get 69
+  map_set_dynamic
+
+  # Bind args
+  label nd_wt_bind
+  register_get 63
+  push
+  register_get 64
+  compare_eq
+  jump_if nd_wt_exec
+
+  register_get 62
+  push
+  register_get 64
+  array_get
+  push
+  register_get 67
+  push
+  register_get 64
+  array_get
+  push
+  register_get 69
+  map_set_dynamic
+
+  register_get 64
+  add 1
+  register_to 64
+  jump nd_wt_bind
+
+  label nd_wt_exec
+  register_get 11
+  register_to 55
+  register_get 12
+  register_to 56
+  register_get 40
+  register_to 57
+
+  register_get 69
+  register_to 11
+  register_get 68
+  typeof
+  string_compare 'string'
+  jump_if_not nd_wt_walk
+  register_get 68
+  register_to 12
+
+  label nd_wt_walk
+  value 0
+  register_to 40
+
+  tree_save
+  register_get 65
+  tree_seek
+  tree_advance
+
+  invoke crown_walk
+
+  tree_restore
+
+  register_get 55
+  register_to 11
+  register_get 56
+  register_to 12
+  return
+]
+
+# === Native object constructors ===
+
+define make_process_obj [
+  map_new
+  register_to 70
+
+  string 'process'
+  push
+  string '__module__'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # env map
+  map_new
+  register_to 71
+  register_get 71
+  push
+  string 'env'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # exit function
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 70
+  push
+  string '__fn_this'
+  push
+  register_get 71
+  map_set_dynamic
+  string 'exit'
+  push
+  string '__fn_method'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'exit'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # cwd function
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 70
+  push
+  string '__fn_this'
+  push
+  register_get 71
+  map_set_dynamic
+  string 'cwd'
+  push
+  string '__fn_method'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'cwd'
+  push
+  register_get 70
+  map_set_dynamic
+
+  register_get 70
+  return
+]
+
+define make_array_obj [
+  map_new
+  register_to 70
+
+  string 'Array'
+  push
+  string '__module__'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # isArray function
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 70
+  push
+  string '__fn_this'
+  push
+  register_get 71
+  map_set_dynamic
+  string 'isArray'
+  push
+  string '__fn_method'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'isArray'
+  push
+  register_get 70
+  map_set_dynamic
+
+  register_get 70
+  return
+]
+
+define make_math_obj [
+  map_new
+  register_to 70
+  # PI as integer approximation (3)
+  value 3
+  push
+  string 'PI'
+  push
+  register_get 70
+  map_set_dynamic
+  register_get 70
+  return
+]
+
+define get_date_string [
+  sys_date_string
+  register_to 16
+  return
+]
+
+# minutes from epoch (register 72 = epoch seconds); result in register 16
+define get_minutes_from_epoch [
+  register_get 72
+  push
+  value 60
+  push
+  register_get 72
+  divide
+  register_to 55
+  register_get 55
+  push
+  value 60
+  push
+  register_get 55
+  divide
+  value 60
+  multiply
+  register_to 56
+  register_get 56
+  push
+  register_get 55
+  subtract
+  register_to 16
+  return
+]
+
+define make_date_obj [
+  map_new
+  register_to 70
+  value 3
+  push
+  string '__fn_native'
+  push
+  register_get 70
+  map_set_dynamic
+  register_get 70
+  return
+]
+
+define make_console_obj [
+  map_new
+  register_to 70
+
+  # clear function
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'clear'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # log function
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'log'
+  push
+  register_get 70
+  map_set_dynamic
+
+  register_get 70
+  return
+]
+
+define make_fs_obj [
+  map_new
+  register_to 70
+
+  string 'fs'
+  push
+  string '__module__'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # readFile method
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 70
+  push
+  string '__fn_this'
+  push
+  register_get 71
+  map_set_dynamic
+  string 'readFile'
+  push
+  string '__fn_method'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'readFile'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # readdir method
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 70
+  push
+  string '__fn_this'
+  push
+  register_get 71
+  map_set_dynamic
+  string 'readdir'
+  push
+  string '__fn_method'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'readdir'
+  push
+  register_get 70
+  map_set_dynamic
+
+  register_get 70
+  return
+]
+
+define make_path_obj [
+  map_new
+  register_to 70
+
+  string 'path'
+  push
+  string '__module__'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # join method
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 70
+  push
+  string '__fn_this'
+  push
+  register_get 71
+  map_set_dynamic
+  string 'join'
+  push
+  string '__fn_method'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'join'
+  push
+  register_get 70
+  map_set_dynamic
+
+  # dirname method
+  map_new
+  register_to 71
+  value 1
+  push
+  string '__fn_native'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 70
+  push
+  string '__fn_this'
+  push
+  register_get 71
+  map_set_dynamic
+  string 'dirname'
+  push
+  string '__fn_method'
+  push
+  register_get 71
+  map_set_dynamic
+  register_get 71
+  push
+  string 'dirname'
+  push
+  register_get 70
+  map_set_dynamic
+
+  register_get 70
+  return
+]
+
+# === Run all files ===
 invoke crown_run_all

@@ -20,10 +20,26 @@ map_set 'name'
 register_get 0
 map_get 'name'
 log
+register_get 0
+map_get 'name'
+compare_string_eq 'Alice'
+jump_if name_ok
+log FAIL: map name should be Alice
+jump name_done
+label name_ok
+log PASS: map name is Alice
+label name_done
 
 register_get 0
 map_get 'age'
 log
+compare_eq 42
+jump_if age_ok
+log FAIL: map age should be 42
+jump age_done
+label age_ok
+log PASS: map age is 42
+label age_done
 
 # Check key existence
 register_get 0
@@ -66,6 +82,13 @@ array_push
 register_get 1
 array_length
 log
+compare_eq 3
+jump_if len_ok
+log FAIL: array length should be 3
+jump len_done
+label len_ok
+log PASS: array length is 3
+label len_done
 
 # Get element at index 1 (push array, set index, get)
 register_get 1
@@ -73,3 +96,12 @@ push
 value 1
 array_get
 log
+compare_eq 20
+jump_if get1_ok
+log FAIL: array index 1 should be 20
+jump get1_done
+label get1_ok
+log PASS: array index 1 is 20
+label get1_done
+
+log PASS: data-structures checks complete

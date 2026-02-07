@@ -170,4 +170,152 @@ itoa:
     popq %r13
     popq %r12
     popq %rbx
+    ret
+
+# strstr(haystack=%rdi, needle=%rsi) -> index in %rax (-1 if not found)
+strstr:
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    movq %rdi, %r12
+    movq %rsi, %r13
+    # Get needle length
+    movq %rsi, %rdi
+    call strlen
+    testq %rax, %rax
+    jz .ss_zero
+    movq %rax, %rbx
+    # Search
+    xorq %rcx, %rcx
+.ss_outer:
+    cmpb $0, (%r12, %rcx)
+    je .ss_nf
+    xorq %rdx, %rdx
+.ss_inner:
+    cmpq %rbx, %rdx
+    je .ss_found
+    movb (%r12, %rcx), %al
+    testb %al, %al
+    jz .ss_nf
+    movb (%r13, %rdx), %r8b
+    cmpb %r8b, %al
+    jne .ss_next
+    incq %rcx
+    incq %rdx
+    jmp .ss_inner
+.ss_next:
+    subq %rdx, %rcx
+    incq %rcx
+    jmp .ss_outer
+.ss_found:
+    subq %rdx, %rcx
+    movq %rcx, %rax
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+.ss_nf:
+    movq $-1, %rax
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+.ss_zero:
+    xorq %rax, %rax
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+
+# str_ends_with(str=%rdi, suffix=%rsi) -> 1/0 in %rax
+str_ends_with:
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    movq %rdi, %r12
+    movq %rsi, %r13
+    call strlen
+    movq %rax, %rbx
+    movq %r13, %rdi
+    call strlen
+    cmpq %rbx, %rax
+    jg .sew_no
+    movq %rbx, %rcx
+    subq %rax, %rcx
+    # Compare str+offset with suffix
+    xorq %rdx, %rdx
+.sew_loop:
+    cmpq %rax, %rdx
+    je .sew_yes
+    movb (%r12, %rcx), %r8b
+    movb (%r13, %rdx), %r9b
+    cmpb %r9b, %r8b
+    jne .sew_no
+    incq %rcx
+    incq %rdx
+    jmp .sew_loop
+.sew_yes:
+    movq $1, %rax
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+.sew_no:
+    xorq %rax, %rax
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+
+# str_concat(s1=%rdi, s2=%rsi) -> new string in %rax
+str_concat:
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    movq %rdi, %r12
+    movq %rsi, %r13
+    call strlen
+    movq %rax, %r14
+    movq %r13, %rdi
+    call strlen
+    movq %rax, %rbx
+    # Allocate len1 + len2 + 1
+    leaq 1(%r14, %rbx), %rdi
+    call heap_alloc
+    movq %rax, %rcx
+    # Copy s1
+    movq %rcx, %rdi
+    movq %r12, %rsi
+    movq %r14, %rdx
+    pushq %rcx
+    call memcpy
+    popq %rcx
+    # Copy s2
+    leaq (%rcx, %r14), %rdi
+    movq %r13, %rsi
+    movq %rbx, %rdx
+    pushq %rcx
+    call memcpy
+    popq %rcx
+    # Null terminate
+    movq %r14, %rax
+    addq %rbx, %rax
+    movb $0, (%rcx, %rax)
+    movq %rcx, %rax
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+
+# strdup(src=%rdi) -> heap copy in %rax
+strdup:
+    pushq %rbx
+    movq %rdi, %rbx
+    call strlen
+    movq %rax, %rsi
+    movq %rbx, %rdi
+    call strdup_len
+    popq %rbx
     ret'

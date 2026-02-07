@@ -650,10 +650,11 @@ cr_dispatch:
     popq %rbx
     movq %rbx, %rax
     shlq $4, %rax
+    # Buffer starts at 8(%rsp) (below saved_rbx); do not overwrite return address
     movq cr_cur_type(%rip), %rcx
-    movq %rcx, (%rsp, %rax)
-    movq cr_cur_val(%rip), %rcx
     movq %rcx, 8(%rsp, %rax)
+    movq cr_cur_val(%rip), %rcx
+    movq %rcx, 16(%rsp, %rax)
     incq %rbx
     jmp .cr_tmpl_eval
 .cr_tmpl_eval_done:
@@ -680,10 +681,10 @@ cr_dispatch:
     movzbq %al, %rax
     subq $48, %rax                 # arg index (0-9)
     incq %rbx
-    # Look up pre-evaluated arg on stack
+    # Look up pre-evaluated arg on stack (buffer at 8(%rsp))
     shlq $4, %rax
-    movq (%rsp, %rax), %rdx       # type
-    movq 8(%rsp, %rax), %rsi      # value
+    movq 8(%rsp, %rax), %rdx      # type
+    movq 16(%rsp, %rax), %rsi     # value
     cmpq $2, %rdx
     je .cr_tmpl_int
     cmpq $3, %rdx
