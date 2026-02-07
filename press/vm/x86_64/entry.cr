@@ -35,7 +35,10 @@ opt_zero_long:
 default_engine:
     .asciz "engines/a.ca"
 default_repl:
-    .asciz "repl.cr"'
+    .asciz "repl.cr"
+env_mem_limit_key:
+    .ascii "CROWN_VM_MAX_MEMORY_MB="
+    .set env_mem_limit_key_len, . - env_mem_limit_key'
 
 get emit_bss, call '    .lcomm saved_rsp, 8
     .lcomm saved_envp, 8
@@ -45,7 +48,8 @@ get emit_bss, call '    .lcomm saved_rsp, 8
     .lcomm rt_args_count, 8
     .lcomm file_buffer, 1048576
     .lcomm file_size, 8
-    .lcomm banner_suppress, 8'
+    .lcomm banner_suppress, 8
+    .lcomm rlimit_buf, 16'
 
 get emit_text, call '.globl _start
 _start:
@@ -55,6 +59,9 @@ _start:
     movq (%rsp), %rcx
     leaq 16(%rsp, %rcx, 8), %rax
     movq %rax, saved_envp(%rip)
+
+    # Optional: set RLIMIT_AS from CROWN_VM_MAX_MEMORY_MB so brk fails cleanly
+    call set_mem_limit
 
     # Initialize heap
     call heap_init
@@ -98,6 +105,71 @@ _start:
 .exit_success:
     xorq %rdi, %rdi
     call sys_exit
+
+# set_mem_limit - if env CROWN_VM_MAX_MEMORY_MB is set, set RLIMIT_AS so brk fails at that limit
+# (so we get "heap allocation failed" instead of SIGKILL when limit is hit)
+set_mem_limit:
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    movq saved_envp(%rip), %rbx
+.sml_loop:
+    movq (%rbx), %rdi
+    testq %rdi, %rdi
+    jz .sml_done
+    leaq env_mem_limit_key(%rip), %rsi
+    xorq %rcx, %rcx
+.sml_cmp:
+    cmpq $env_mem_limit_key_len, %rcx
+    jge .sml_match
+    movzbl (%rdi, %rcx), %eax
+    movzbl (%rsi, %rcx), %edx
+    cmpb %dl, %al
+    jne .sml_next
+    incq %rcx
+    jmp .sml_cmp
+.sml_match:
+    addq $env_mem_limit_key_len, %rdi
+    call atoi_simple
+    testq %rax, %rax
+    jz .sml_done
+    movq %rax, %r12
+    shlq $20, %r12
+    leaq rlimit_buf(%rip), %rdi
+    movq %r12, (%rdi)
+    movq %r12, 8(%rdi)
+    movq $160, %rax
+    movq $9, %rdi
+    leaq rlimit_buf(%rip), %rsi
+    syscall
+    jmp .sml_done
+.sml_next:
+    addq $8, %rbx
+    jmp .sml_loop
+.sml_done:
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+
+# atoi_simple(str=%rdi) -> value in %rax (decimal, stops at first non-digit)
+atoi_simple:
+    xorq %rax, %rax
+    movq $10, %rcx
+.atoi_loop:
+    movzbl (%rdi), %edx
+    testl %edx, %edx
+    jz .atoi_ret
+    subq $48, %rdx
+    js .atoi_ret
+    cmpq $9, %rdx
+    ja .atoi_ret
+    imulq %rcx, %rax
+    addq %rdx, %rax
+    incq %rdi
+    jmp .atoi_loop
+.atoi_ret:
+    ret
 
 # parse_args - split argv on "--"
 # Before "--": .ca file paths -> ca_files[]

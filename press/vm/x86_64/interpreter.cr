@@ -29,7 +29,9 @@ get emit_bss, call '    .lcomm vm_regs, 4096
     .lcomm str_build_len, 8
     .lcomm vm_run_stack, 512
     .lcomm vm_run_sp, 8
-    .lcomm module_parse_buf, 262144'
+    .lcomm module_parse_buf, 262144
+    .lcomm reusable_tree_buf, 8
+    .lcomm reusable_file_buf, 8'
 
 get emit_data, call '# CA command name strings for dispatch
 ca_cmd_value:       .asciz "value"
@@ -59,6 +61,7 @@ ca_cmd_push:        .asciz "push"
 ca_cmd_pop:         .asciz "pop"
 ca_cmd_sys_exit:    .asciz "sys_exit"
 ca_cmd_file_read:   .asciz "file_read"
+ca_cmd_file_release:.asciz "file_release"
 ca_cmd_map_new:      .asciz "map_new"
 ca_cmd_map_set:      .asciz "map_set"
 ca_cmd_map_get:      .asciz "map_get"
@@ -79,6 +82,7 @@ ca_cmd_tree_rest:    .asciz "tree_restore"
 ca_cmd_tree_skip:    .asciz "tree_skip_block"
 ca_cmd_tree_pos:     .asciz "tree_position"
 ca_cmd_tree_seek:    .asciz "tree_seek"
+ca_cmd_tree_release: .asciz "tree_release"
 ca_cmd_str_cmp:      .asciz "string_compare"
 ca_cmd_str_concat:   .asciz "string_concat"
 ca_cmd_str_charat:   .asciz "string_char_at"
@@ -118,7 +122,8 @@ ca_cmd_sys_getcwd:   .asciz "sys_getcwd"
 ca_cmd_sys_getdents: .asciz "sys_getdents"
 ca_cmd_sys_stat_f:   .asciz "sys_stat_file"
 ca_cmd_sys_epoch:    .asciz "sys_epoch"
-ca_cmd_sys_date_str: .asciz "sys_date_string"
+    ca_cmd_sys_date_str: .asciz "sys_date_string"
+    ca_cmd_sys_local_min: .asciz "sys_local_minutes"
 ca_cmd_str_indexof:  .asciz "string_index_of"
 ca_cmd_str_endswith: .asciz "string_ends_with"
 ca_cmd_str_slice:    .asciz "string_slice"
@@ -508,6 +513,13 @@ vm_dispatch:
     testq %rax, %rax
     jz .ca_file_read
 
+    # --- file_release ---
+    leaq ca_cmd_file_release(%rip), %rsi
+    movq %rbx, %rdi
+    call strcmp
+    testq %rax, %rax
+    jz .ca_file_release
+
     # --- map_new ---
     leaq ca_cmd_map_new(%rip), %rsi
     movq %rbx, %rdi
@@ -647,6 +659,13 @@ vm_dispatch:
     call strcmp
     testq %rax, %rax
     jz .ca_tree_seek
+
+    # --- tree_release ---
+    leaq ca_cmd_tree_release(%rip), %rsi
+    movq %rbx, %rdi
+    call strcmp
+    testq %rax, %rax
+    jz .ca_tree_release
 
     # --- string_compare ---
     leaq ca_cmd_str_cmp(%rip), %rsi
@@ -864,6 +883,13 @@ vm_dispatch:
     call strcmp
     testq %rax, %rax
     jz .ca_sys_date_string
+
+    # --- sys_local_minutes ---
+    leaq ca_cmd_sys_local_min(%rip), %rsi
+    movq %rbx, %rdi
+    call strcmp
+    testq %rax, %rax
+    jz .ca_sys_local_minutes
 
     # --- string_index_of ---
     leaq ca_cmd_str_indexof(%rip), %rsi
@@ -1539,6 +1565,7 @@ vm_dispatch:
     call sys_exit
 
 # file_read - read file path from current string, content becomes current
+# Reuses reusable_file_buf when set (from file_release) to avoid OOM when loading many files
 .ca_file_read:
     movq vm_cur_val(%rip), %rdi
     xorq %rsi, %rsi
@@ -1547,11 +1574,19 @@ vm_dispatch:
     testq %rax, %rax
     js .ca_fr_fail
     movq %rax, %r8                 # r8 = fd
+    movq reusable_file_buf(%rip), %rbx
+    testq %rbx, %rbx
+    jnz .ca_fr_use_reusable
     pushq %r8
     movq $262144, %rdi
     call heap_alloc
     movq %rax, %rbx                # rbx = buffer
     popq %r8
+    jmp .ca_fr_after_alloc
+.ca_fr_use_reusable:
+    xorq %rax, %rax
+    movq %rax, reusable_file_buf(%rip)
+.ca_fr_after_alloc:
     xorq %r9, %r9                  # r9 = total bytes read
 .ca_fr_read_loop:
     movq %r8, %rdi
@@ -1581,6 +1616,12 @@ vm_dispatch:
 .ca_fr_fail:
     movq $0, vm_cur_type(%rip)
     movq $0, vm_cur_val(%rip)
+    jmp .vm_safe_ret
+
+# file_release - mark current value (file content buffer ptr) as reusable for next file_read
+.ca_file_release:
+    movq vm_cur_val(%rip), %rax
+    movq %rax, reusable_file_buf(%rip)
     jmp .vm_safe_ret
 
 # === Map Commands ===
@@ -1746,28 +1787,40 @@ vm_dispatch:
 # === Tree Navigation Commands ===
 
 # tree_parse - parse current string as Crown, set up cursor
+# Reuses reusable_tree_buf when set (from tree_release) to avoid OOM when loading many files
 .ca_tree_parse:
     movq vm_cur_val(%rip), %rdi
     call strlen
     pushq %rax                      # save length
     pushq %rdi                      # save source ptr (may be clobbered)
-    # Reload source pointer (strlen preserves %rdi on our impl)
     movq vm_cur_val(%rip), %r8
-    # Allocate heap buffer for parse tree
+    # Use reusable buffer if set, else allocate
+    movq reusable_tree_buf(%rip), %r9
+    testq %r9, %r9
+    jnz .ca_tp_use_reusable
     movq $262144, %rdi
     call heap_alloc_zero
-    movq %rax, %r9                  # save buffer ptr
-    popq %rdi                       # restore source ptr
-    popq %rsi                       # restore length
-    # parse_common(input=%rdi, length=%rsi, output=%rdx)
-    movq vm_cur_val(%rip), %rdi     # source string
-    movq %r9, %rdx                  # output buffer
-    pushq %r9                       # save buffer base
+    movq %rax, %r9
+    jmp .ca_tp_after_alloc
+.ca_tp_use_reusable:
+    xorq %rax, %rax
+    movq %rax, reusable_tree_buf(%rip)
+.ca_tp_after_alloc:
+    popq %rdi
+    popq %rsi
+    movq vm_cur_val(%rip), %rdi
+    movq %r9, %rdx
+    pushq %r9
     call parse_common
-    popq %r9                        # restore buffer base
-    # Set cursor to buffer + 16 (skip implicit BLOCK_START)
+    popq %r9
     addq $16, %r9
     movq %r9, tree_cursor(%rip)
+    jmp .vm_safe_ret
+
+# tree_release - mark current value (buffer ptr) as reusable for next tree_parse (avoids OOM)
+.ca_tree_release:
+    movq vm_cur_val(%rip), %rax
+    movq %rax, reusable_tree_buf(%rip)
     jmp .vm_safe_ret
 
 # tree_type - get node type at cursor as integer
@@ -1811,9 +1864,11 @@ vm_dispatch:
     movq %rax, tree_cursor(%rip)
     jmp .vm_safe_ret
 
-# tree_save - push cursor position to internal stack
+# tree_save - push cursor position to internal stack (max 1024 to avoid overflow)
 .ca_tree_save:
     movq tree_cursor_sp(%rip), %rcx
+    cmpq $1024, %rcx
+    jge .vm_safe_ret
     leaq tree_cursor_stack(%rip), %rdi
     movq tree_cursor(%rip), %rax
     movq %rax, (%rdi, %rcx, 8)
@@ -2433,7 +2488,7 @@ vm_dispatch:
 
 # sys_epoch - set current to seconds since epoch (number)
 .ca_sys_epoch:
-    call sys_time
+    call gettimeofday_sec
     movq $2, vm_cur_type(%rip)
     movq %rax, vm_cur_val(%rip)
     jmp .vm_safe_ret
@@ -2449,6 +2504,13 @@ vm_dispatch:
 .ca_sds_fail:
     movq $0, vm_cur_type(%rip)
     movq $0, vm_cur_val(%rip)
+    jmp .vm_safe_ret
+
+# sys_local_minutes - set current to local minutes (0-59), matches Node getMinutes()
+.ca_sys_local_minutes:
+    call run_local_minutes
+    movq $2, vm_cur_type(%rip)
+    movq %rax, vm_cur_val(%rip)
     jmp .vm_safe_ret
 
 # sys_stat_file - stat a file path (current string)

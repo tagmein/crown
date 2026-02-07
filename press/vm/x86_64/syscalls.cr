@@ -1,7 +1,8 @@
 # Linux x86-64 syscall wrappers and I/O helpers
 
 get emit_bss, call '    .lcomm pipe_fds, 8
-    .lcomm date_read_buf, 128'
+    .lcomm date_read_buf, 128
+    .lcomm timeval_buf, 16'
 
 get emit_data, call 'date_path:
     .asciz "/bin/date"
@@ -12,6 +13,12 @@ date_argv1:
 date_argv:
     .quad date_argv0
     .quad date_argv1
+    .quad 0
+date_argv_min_fmt:
+    .asciz "+%M"
+date_argv_min:
+    .quad date_argv0
+    .quad date_argv_min_fmt
     .quad 0'
 
 get emit_text, call '# === Syscall Wrappers ===
@@ -119,6 +126,21 @@ sys_time:
     syscall
     ret
 
+# gettimeofday_sec() -> seconds since epoch in %rax (uses gettimeofday, syscall 96)
+# More reliable than time(2) in some environments
+gettimeofday_sec:
+    leaq timeval_buf(%rip), %rdi
+    xorq %rsi, %rsi
+    movq $96, %rax
+    syscall
+    testq %rax, %rax
+    js .gtod_fail
+    movq timeval_buf(%rip), %rax
+    ret
+.gtod_fail:
+    xorq %rax, %rax
+    ret
+
 # sys_pipe(fd[2]=%rdi) -> 0 on success
 sys_pipe:
     movq $22, %rax
@@ -217,6 +239,80 @@ run_date_string:
     syscall
 .rds_fail:
     xorq %rax, %rax
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+
+# run_local_minutes() -> local minutes (0-59) in %rax, 0 on failure
+# Runs date +%M for local time (matches Node getMinutes())
+run_local_minutes:
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    leaq pipe_fds(%rip), %rdi
+    call sys_pipe
+    testq %rax, %rax
+    js .rlm_fail
+    call sys_fork
+    testq %rax, %rax
+    js .rlm_fail
+    jz .rlm_child
+    movq %rax, %r12
+    movl pipe_fds(%rip), %ebx
+    movl pipe_fds+4(%rip), %r13d
+    movq %r13, %rdi
+    call sys_close
+    leaq date_read_buf(%rip), %rsi
+    movq $127, %rdx
+    movq %rbx, %rdi
+    call sys_read
+    testq %rax, %rax
+    jle .rlm_fail
+    movq %r12, %rdi
+    xorq %rsi, %rsi
+    xorq %rdx, %rdx
+    call sys_waitpid
+    movq %rbx, %rdi
+    call sys_close
+    leaq date_read_buf(%rip), %rdi
+    xorq %rcx, %rcx
+.rlm_find_nl:
+    movb (%rdi, %rcx), %al
+    testb %al, %al
+    jz .rlm_parse
+    cmpb $10, %al
+    je .rlm_zero_nl
+    incq %rcx
+    cmpq $126, %rcx
+    jb .rlm_find_nl
+.rlm_zero_nl:
+    movb $0, (%rdi, %rcx)
+.rlm_parse:
+    call vm_parse_int
+    testq %rdx, %rdx
+    jz .rlm_fail
+    popq %r13
+    popq %r12
+    popq %rbx
+    ret
+.rlm_child:
+    movl pipe_fds+4(%rip), %edi
+    movq $1, %rsi
+    call sys_dup2
+    movl pipe_fds(%rip), %edi
+    call sys_close
+    movl pipe_fds+4(%rip), %edi
+    call sys_close
+    leaq date_path(%rip), %rdi
+    leaq date_argv_min(%rip), %rsi
+    movq saved_envp(%rip), %rdx
+    call sys_execve
+    movq $60, %rax
+    movq $1, %rdi
+    syscall
+.rlm_fail:
+    movq $-1, %rax
     popq %r13
     popq %r12
     popq %rbx
